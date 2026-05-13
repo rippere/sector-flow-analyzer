@@ -34,7 +34,11 @@ class SectorETF(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     price_data = relationship("PriceData", back_populates="etf", cascade="all, delete-orphan")
-    covariance_matrices = relationship("CovarianceMatrix", back_populates="etf_a")
+    covariance_matrices = relationship(
+        "CovarianceMatrix",
+        back_populates="etf_a",
+        foreign_keys="CovarianceMatrix.etf_a_id",
+    )
 
 
 class PriceData(Base):

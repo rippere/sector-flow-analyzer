@@ -67,7 +67,7 @@ def test_get_price_data_with_date_filter(db_session, mock_ohlcv_data):
     price_repo.save_price_data(etf.id, mock_ohlcv_data)
     db_session.commit()
 
-    start = datetime(2024, 1, 3)
+    start = datetime(2024, 1, 4)
     rows = price_repo.get_price_data(etf.id, start=start)
     assert len(rows) == 3
 

@@ -1,4 +1,5 @@
 import click
+import requests
 
 
 @click.group()
@@ -189,6 +190,157 @@ def serve(host: str | None, port: int | None, reload: bool):
         reload=reload,
         log_level=settings.log_level.lower(),
     )
+
+
+@main.command(name="osc-bridge")
+@click.option("--api-url", default="http://localhost:8000", show_default=True, help="FastAPI base URL")
+@click.option("--osc-host", default="127.0.0.1", show_default=True, help="OSC target host")
+@click.option("--osc-port", default=9000, show_default=True, type=int, help="OSC target port")
+@click.option("--interval", default=1, show_default=True, type=int, help="Broadcast interval in seconds")
+def osc_bridge(api_url: str, osc_host: str, osc_port: int, interval: int):
+    """Start the OSC bridge — broadcasts sector flow data as OSC messages (e.g. to nw_wrld)."""
+    from sector_flow.integrations.osc_bridge import OSCBridge
+    bridge = OSCBridge(api_url=api_url, osc_host=osc_host, osc_port=osc_port)
+    bridge.run_forever(interval_seconds=interval)
+
+
+_SECTOR_FULL_NAMES: dict[str, str] = {
+    "XLK": "Technology",
+    "XLF": "Financials",
+    "XLE": "Energy",
+    "XLV": "Healthcare",
+    "XLY": "Consumer Discretion",
+    "XLP": "Consumer Staples",
+    "XLI": "Industrials",
+    "XLB": "Materials",
+    "XLRE": "Real Estate",
+    "XLU": "Utilities",
+    "XLC": "Communication Svcs",
+}
+
+
+def _build_query_output(api_url: str) -> str:
+    """Fetch live data from the API and return a formatted analysis string."""
+    from datetime import date
+
+    base = api_url.rstrip("/")
+    today = date.today().isoformat()
+
+    try:
+        regime_resp = requests.get(f"{base}/analysis/regime", timeout=8)
+        regime_resp.raise_for_status()
+        regime_data = regime_resp.json()
+    except Exception as exc:
+        return f"ERROR: Could not reach API at {api_url} — {exc}"
+
+    try:
+        corr_resp = requests.get(f"{base}/analysis/correlations", timeout=8)
+        corr_resp.raise_for_status()
+        correlations = corr_resp.json()
+    except Exception:
+        correlations = []
+
+    market_regime: str = regime_data.get("market_regime", "unknown").upper()
+    cohesion: float = regime_data.get("cohesion", 0.0)
+    sig_pairs: int = regime_data.get("significant_pairs", 0)
+    total_pairs: int = regime_data.get("total_pairs", 0)
+    sector_momentum: dict[str, float] = regime_data.get("sector_momentum", {})
+    sector_regimes: dict[str, str] = regime_data.get("sector_regimes", {})
+
+    # Sort sectors by momentum descending
+    sorted_tickers = sorted(sector_momentum.keys(), key=lambda t: sector_momentum[t], reverse=True)
+
+    leaders = [t for t in sorted_tickers if sector_momentum[t] > 0][:5]
+    laggards = [t for t in reversed(sorted_tickers) if sector_momentum[t] < 0][:5]
+
+    lines: list[str] = []
+    lines.append(f"=== Sector Flow Analysis — {today} ===")
+    lines.append("")
+    lines.append(
+        f"Market: {market_regime} | Cohesion: {cohesion:.2f} | "
+        f"{sig_pairs}/{total_pairs} significant pairs"
+    )
+    lines.append("")
+
+    if leaders:
+        lines.append("Momentum Leaders (accumulating):")
+        for t in leaders:
+            name = _SECTOR_FULL_NAMES.get(t, t)
+            mom = sector_momentum[t]
+            reg = sector_regimes.get(t, "neutral")
+            lines.append(f"  {t:<6}  {name:<22}  {mom:+.3f}  [{reg}]")
+    else:
+        lines.append("Momentum Leaders: none")
+
+    lines.append("")
+
+    if laggards:
+        lines.append("Momentum Laggards (distributing):")
+        for t in laggards:
+            name = _SECTOR_FULL_NAMES.get(t, t)
+            mom = sector_momentum[t]
+            reg = sector_regimes.get(t, "neutral")
+            lines.append(f"  {t:<6}  {name:<22}  {mom:+.3f}  [{reg}]")
+    else:
+        lines.append("Momentum Laggards: none")
+
+    lines.append("")
+    lines.append("Rotation Thesis:")
+
+    # Build narrative
+    leader_names = ", ".join(_SECTOR_FULL_NAMES.get(t, t) for t in leaders[:3])
+    laggard_names = " and ".join(_SECTOR_FULL_NAMES.get(t, t) for t in laggards[:2])
+    cohesion_desc = "high" if cohesion > 0.7 else "moderate" if cohesion > 0.4 else "low"
+
+    lines.append(
+        f"  Current market regime is {market_regime} with {cohesion_desc} cohesion ({cohesion:.2f})."
+    )
+    if leader_names:
+        lines.append(
+            f"  Capital appears to be rotating INTO {leader_names}"
+        )
+    if laggard_names:
+        lines.append(
+            f"  and OUT OF {laggard_names}."
+        )
+
+    # Call out distribution sectors
+    dist_sectors = [
+        t for t in sorted_tickers
+        if sector_regimes.get(t) in ("distribution", "breakdown")
+    ]
+    if dist_sectors:
+        for dt in dist_sectors[:2]:
+            dn = _SECTOR_FULL_NAMES.get(dt, dt)
+            dr = sector_regimes[dt]
+            lines.append(
+                f"  {dt} ({dn}) shows active {dr} — watch for further weakness."
+            )
+
+    # Top correlations
+    if correlations:
+        lines.append("")
+        lines.append("Strongest Correlations:")
+        top_corr = sorted(correlations, key=lambda c: abs(c.get("correlation", 0)), reverse=True)[:6]
+        pairs_str = "  " + "  ".join(
+            f"{p['ticker_a']} ↔ {p['ticker_b']}: {p['correlation']:+.2f}"
+            for p in top_corr
+        )
+        lines.append(pairs_str)
+
+    return "\n".join(lines)
+
+
+@main.command()
+@click.argument("question", required=False)
+@click.option("--api-url", default="http://localhost:8000", show_default=True, help="FastAPI base URL")
+def query(question: str | None, api_url: str):
+    """Print a structured natural-language sector rotation analysis from live API data.
+
+    QUESTION is optional — the same analysis is always shown regardless of the query text.
+    """
+    output = _build_query_output(api_url)
+    click.echo(output)
 
 
 if __name__ == "__main__":

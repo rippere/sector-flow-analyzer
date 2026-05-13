@@ -41,6 +41,7 @@ dependencies = [
     "loguru>=0.7.2",
     "requests>=2.31.0",
     "click>=8.1.0",
+    "python-osc>=1.8.0",
 ]
 
 [project.optional-dependencies]

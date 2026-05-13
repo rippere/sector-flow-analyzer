@@ -2,7 +2,8 @@ from datetime import datetime
 from typing import Optional
 import math
 from sqlalchemy.orm import Session
-from sector_flow.database.models import SectorETF, PriceData, SECTOR_ETFS
+from sqlalchemy import and_
+from sector_flow.database.models import SectorETF, PriceData, CovarianceMatrix, FlowMetric, SECTOR_ETFS
 
 
 class ETFRepository:
@@ -129,3 +130,125 @@ class PriceRepository:
 
         self.session.flush()
         return updated
+
+
+class FlowMetricRepository:
+    """Repository for per-sector FlowMetric records (regime, momentum, cohesion)."""
+
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save_metric(
+        self,
+        etf_id: int,
+        date: datetime,
+        metric_name: str,
+        value: float,
+    ) -> bool:
+        """Upsert — update if exists, insert if not."""
+        existing = (
+            self.session.query(FlowMetric)
+            .filter_by(etf_id=etf_id, date=date, metric_name=metric_name)
+            .first()
+        )
+        if existing is not None:
+            existing.value = value
+            existing.computed_at = datetime.utcnow()
+        else:
+            self.session.add(
+                FlowMetric(
+                    etf_id=etf_id,
+                    date=date,
+                    metric_name=metric_name,
+                    value=value,
+                    computed_at=datetime.utcnow(),
+                )
+            )
+        self.session.flush()
+        return True
+
+    def get_latest(self, etf_id: int, metric_name: str) -> Optional[float]:
+        """Most recent value for this metric."""
+        row = (
+            self.session.query(FlowMetric)
+            .filter_by(etf_id=etf_id, metric_name=metric_name)
+            .order_by(FlowMetric.date.desc())
+            .first()
+        )
+        return row.value if row else None
+
+    def get_series(
+        self,
+        etf_id: int,
+        metric_name: str,
+        start: Optional[datetime] = None,
+    ) -> list[FlowMetric]:
+        """Time series for charting."""
+        q = self.session.query(FlowMetric).filter_by(etf_id=etf_id, metric_name=metric_name)
+        if start:
+            q = q.filter(FlowMetric.date >= start)
+        return q.order_by(FlowMetric.date).all()
+
+
+class CovarianceRepository:
+    """Repository for rolling covariance/correlation pairs."""
+
+    def __init__(self, session: Session):
+        self.session = session
+
+    def save_pairs(self, pairs: list[dict]) -> int:
+        """
+        Upsert covariance pairs into CovarianceMatrix.
+
+        Each dict must have: etf_a_id, etf_b_id, window_days, computed_at,
+        covariance, correlation.
+
+        Returns count of rows inserted or updated.
+        """
+        saved = 0
+        for pair in pairs:
+            existing = (
+                self.session.query(CovarianceMatrix)
+                .filter_by(
+                    etf_a_id=pair["etf_a_id"],
+                    etf_b_id=pair["etf_b_id"],
+                    window_days=pair["window_days"],
+                    computed_at=pair["computed_at"],
+                )
+                .first()
+            )
+            if existing is not None:
+                existing.covariance = pair["covariance"]
+                existing.correlation = pair["correlation"]
+            else:
+                self.session.add(
+                    CovarianceMatrix(
+                        etf_a_id=pair["etf_a_id"],
+                        etf_b_id=pair["etf_b_id"],
+                        window_days=pair["window_days"],
+                        computed_at=pair["computed_at"],
+                        covariance=pair["covariance"],
+                        correlation=pair["correlation"],
+                    )
+                )
+            saved += 1
+        self.session.flush()
+        return saved
+
+    def get_latest_matrix(self, window: int = 30) -> list[CovarianceMatrix]:
+        """Most recent covariance pairs for all sector pairs with given window."""
+        # Find the most recent computed_at timestamp for this window
+        latest_row = (
+            self.session.query(CovarianceMatrix.computed_at)
+            .filter_by(window_days=window)
+            .order_by(CovarianceMatrix.computed_at.desc())
+            .first()
+        )
+        if latest_row is None:
+            return []
+        latest_ts = latest_row[0]
+        return (
+            self.session.query(CovarianceMatrix)
+            .filter_by(window_days=window, computed_at=latest_ts)
+            .all()
+        )

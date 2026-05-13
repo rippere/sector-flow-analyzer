@@ -21,10 +21,51 @@ from sector_flow.database.session import get_session, init_db
 
 TICKERS = [t for t, _, _ in SECTOR_ETFS]
 
+_MAX_GAP_DAYS = 30
+_WARN_GAP_TRADING_DAYS = 5
+
+
+def _compute_gap(price_repo: PriceRepository, etf_repo: ETFRepository) -> int:
+    """
+    Determine the calendar-day gap from the most recent PriceData row to today.
+
+    Queries each ETF's latest date and returns the maximum gap across all ETFs,
+    capped at _MAX_GAP_DAYS. Returns 1 if no data exists yet (fresh DB).
+    """
+    today = date.today()
+    max_gap = 0
+    for ticker, _, _ in SECTOR_ETFS:
+        etf = etf_repo.get_by_ticker(ticker)
+        if etf is None:
+            continue
+        latest = price_repo.get_latest_date(etf.id)
+        if latest is None:
+            # No data at all — treat as needing a full fetch (capped)
+            return _MAX_GAP_DAYS
+        if isinstance(latest, datetime):
+            latest_date = latest.date()
+        else:
+            latest_date = latest
+        gap = (today - latest_date).days
+        if gap > max_gap:
+            max_gap = gap
+
+    if max_gap == 0:
+        return 1  # already up to date
+    return min(max_gap, _MAX_GAP_DAYS)
+
 
 def run_daily(lookback_days: int = 1, database_url: Optional[str] = None) -> dict:
     """
-    Fetch yesterday's (or more) OHLCV + today's SSGA snapshot, merge, persist.
+    Fetch recent OHLCV + today's SSGA snapshot, merge, persist.
+
+    The lookback window is auto-detected from the latest PriceData date in the
+    DB: gap = today - most_recent_row_date, capped at 30 calendar days.
+    A WARNING is logged if the gap exceeds 5 trading days.
+
+    The `lookback_days` parameter is kept for backward compatibility but is
+    ignored when the DB already has data — the gap takes precedence.
+
     Returns a summary dict with row counts and any errors.
     """
     init_db(database_url)
@@ -32,9 +73,6 @@ def run_daily(lookback_days: int = 1, database_url: Optional[str] = None) -> dic
     ssga_collector = SSGACollector()
 
     today = date.today()
-    start = today - timedelta(days=lookback_days + 1)
-    end = today
-
     summary = {"yfinance_rows": 0, "ssga_rows": 0, "flow_rows_updated": 0, "errors": []}
 
     with get_session(database_url) as session:
@@ -42,6 +80,19 @@ def run_daily(lookback_days: int = 1, database_url: Optional[str] = None) -> dic
         price_repo = PriceRepository(session)
 
         etf_repo.seed_etfs()
+
+        # Auto-detect gap from DB instead of using hardcoded lookback_days=1
+        gap = _compute_gap(price_repo, etf_repo)
+        if gap > _WARN_GAP_TRADING_DAYS:
+            logger.warning(
+                f"[pipeline] Data gap is {gap} calendar days — "
+                f"exceeds {_WARN_GAP_TRADING_DAYS} trading-day threshold. "
+                f"Consider running backfill."
+            )
+        logger.info(f"[pipeline] Detected gap: {gap} calendar days → fetching from today-{gap}")
+
+        start = today - timedelta(days=gap + 1)
+        end = today
 
         # --- Phase 1: OHLCV via yfinance ---
         for ticker, _, _ in SECTOR_ETFS:
@@ -104,21 +155,40 @@ def _to_float(val) -> float | None:
         return None
 
 
-def backfill(days: int = 90, database_url: Optional[str] = None) -> dict:
+def backfill(days: Optional[int] = None, database_url: Optional[str] = None) -> dict:
     """
-    Pull up to `days` of OHLCV history for all sectors via yfinance.
+    Pull OHLCV history for all sectors via yfinance.
+
+    If `days` is None and the DB already has data, fetches only the calendar
+    gap between the most recent row and today (capped at 30 days) rather than
+    defaulting to a full 90-day pull. If the DB is empty, defaults to 90 days.
+
     SSGA flow data cannot be backfilled — starts from today forward.
     """
     init_db(database_url)
     yf_collector = YFinanceCollector()
     today = date.today()
-    start = today - timedelta(days=days)
     summary = {"rows_saved": 0, "errors": []}
 
     with get_session(database_url) as session:
         etf_repo = ETFRepository(session)
         price_repo = PriceRepository(session)
         etf_repo.seed_etfs()
+
+        # If days not specified, use gap detection; fall back to 90 for fresh DBs
+        if days is None:
+            detected_gap = _compute_gap(price_repo, etf_repo)
+            # _compute_gap returns _MAX_GAP_DAYS (30) when DB is empty
+            # For backfill with no args, use a 90-day default on empty DB
+            if detected_gap >= _MAX_GAP_DAYS:
+                actual_days = 90
+            else:
+                actual_days = detected_gap
+            logger.info(f"[backfill] No days specified; auto-detected gap = {detected_gap} → fetching {actual_days} days")
+        else:
+            actual_days = days
+
+        start = today - timedelta(days=actual_days)
 
         for ticker, _, _ in SECTOR_ETFS:
             etf = etf_repo.get_by_ticker(ticker)

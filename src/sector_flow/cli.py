@@ -160,5 +160,25 @@ def show_flows(db: str | None):
         click.echo()
 
 
+@main.command()
+@click.option("--host", default=None, help="Bind host (default: from settings)")
+@click.option("--port", default=None, type=int, help="Bind port (default: from settings)")
+@click.option("--reload", is_flag=True, default=False, help="Enable auto-reload (dev mode)")
+def serve(host: str | None, port: int | None, reload: bool):
+    """Start the FastAPI server with uvicorn."""
+    import uvicorn
+    from sector_flow.config import settings
+
+    _host = host or settings.api_host
+    _port = port or settings.api_port
+    uvicorn.run(
+        "sector_flow.api.app:app",
+        host=_host,
+        port=_port,
+        reload=reload,
+        log_level=settings.log_level.lower(),
+    )
+
+
 if __name__ == "__main__":
     main()

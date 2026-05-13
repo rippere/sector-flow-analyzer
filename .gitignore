@@ -41,3 +41,4 @@ coverage.xml
 # OS
 .DS_Store
 Thumbs.db
+dev.db

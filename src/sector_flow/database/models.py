@@ -53,6 +53,11 @@ class PriceData(Base):
     close = Column(Float, nullable=False)
     volume = Column(Float, nullable=False)
     adjusted_close = Column(Float, nullable=False)
+    # Actual net inflow/outflow in USD — populated by a real flow data source (not yfinance).
+    # NULL until a flow collector is wired in Phase 2+.
+    net_inflow_usd = Column(Float, nullable=True)
+    shares_outstanding = Column(Float, nullable=True)
+    aum_usd = Column(Float, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     etf = relationship("SectorETF", back_populates="price_data")

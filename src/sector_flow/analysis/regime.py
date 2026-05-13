@@ -43,25 +43,39 @@ def compute_cohesion(corr_df: pd.DataFrame) -> float:
     return float(np.clip(val, 0.0, 1.0))
 
 
+_RANK_WINDOW = 252  # 1 trading year for percentile rank lookback
+
+
 def compute_momentum(
     price_series: pd.Series,
     window: int = _MOMENTUM_WINDOW,
+    rank_window: int = _RANK_WINDOW,
 ) -> float:
     """
-    Signed normalized momentum: (current - rolling_mean) / rolling_std.
-    Clamped to [-1, 1].
+    Time-series percentile rank of the current N-day return within its own
+    historical distribution, rescaled from [0, 1] to [-1, 1].
+
+    A score of +0.8 means the current 20-day return is in the 90th percentile
+    of this sector's own historical distribution — a genuine relative signal
+    rather than an absolute level comparison. Unlike z-score clamping,
+    multiple sectors cannot all be pinned to ±1.0 unless they are all
+    simultaneously at their all-time extreme 20-day return, which is
+    itself a meaningful (crisis) signal.
 
     Parameters
     ----------
     price_series : pd.Series
-        Time series of adjusted_close values.
+        Time series of adjusted_close values (chronological order).
     window : int
-        Rolling window for mean and std.
+        N-day return window for the momentum signal (default: 20).
+    rank_window : int
+        Number of historical days to rank against (default: 252 = 1 trading year).
 
     Returns
     -------
     float
         Momentum in [-1, 1], or 0.0 if insufficient data.
+        0.0 = current return is at the median of its own history.
     """
     if len(price_series) < 2:
         return 0.0
@@ -70,16 +84,24 @@ def compute_momentum(
     if len(clean) < 2:
         return 0.0
 
-    tail = clean.tail(window)
-    rolling_mean = tail.mean()
-    rolling_std = tail.std()
+    # Compute rolling N-day returns
+    returns = clean.pct_change(window)
+    valid_returns = returns.dropna()
 
-    if rolling_std == 0 or np.isnan(rolling_std):
+    if len(valid_returns) < 2:
         return 0.0
 
-    current = float(clean.iloc[-1])
-    mom = (current - rolling_mean) / rolling_std
-    return float(np.clip(mom, -1.0, 1.0))
+    current = valid_returns.iloc[-1]
+    if pd.isna(current):
+        return 0.0
+
+    # Rank current return within the last rank_window observations
+    historical = valid_returns.iloc[-rank_window:]
+    if len(historical) < 10:
+        return 0.0
+
+    rank = (historical < current).sum() / len(historical)  # 0.0 to 1.0
+    return round(float((rank - 0.5) * 2), 4)  # rescale to [-1, 1], 0 = median
 
 
 def classify_market_regime(

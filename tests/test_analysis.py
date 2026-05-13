@@ -427,6 +427,58 @@ class TestRegime:
 
         assert compute_momentum(pd.Series([], dtype=float)) == 0.0
 
+    def test_momentum_no_all_ones(self):
+        """
+        With realistic 90-day price data for all 11 sectors, fewer than 4
+        sectors should return exactly ±1.0.
+
+        The percentile-rank approach ensures sectors cannot all be pinned to
+        ±1.0 unless every sector is simultaneously at its all-time return extreme.
+        """
+        from sector_flow.analysis.regime import compute_momentum
+
+        rng = np.random.default_rng(123)
+        extreme_count = 0
+        for _ in range(11):
+            # Realistic price series: random walk over 90 days
+            prices = 100.0 + np.cumsum(rng.normal(0, 1, 90))
+            series = pd.Series(prices)
+            mom = compute_momentum(series)
+            if abs(mom) == 1.0:
+                extreme_count += 1
+
+        assert extreme_count < 4, (
+            f"Expected fewer than 4 sectors at ±1.0, got {extreme_count}. "
+            f"Percentile rank should differentiate sectors."
+        )
+
+    def test_momentum_median_return_near_zero(self):
+        """
+        A stationary price series (mean-reverting random walk) should produce
+        momentum near 0.0 because the current 20-day return will typically
+        be close to the median of its own historical distribution.
+        """
+        from sector_flow.analysis.regime import compute_momentum
+
+        # Mean-reverting series: at each step, price moves toward 100
+        # This keeps 20-day returns clustered tightly around 0
+        rng = np.random.default_rng(7)
+        n = 300
+        prices = [100.0]
+        for _ in range(n - 1):
+            # Mean-reversion: move 10% back toward 100 + small noise
+            prev = prices[-1]
+            noise = rng.normal(0, 0.3)
+            prices.append(prev + 0.1 * (100.0 - prev) + noise)
+
+        series = pd.Series(prices)
+        mom = compute_momentum(series)
+        # A stationary series: current 20d return should land near the middle
+        # of its own distribution — allow ±0.7 tolerance
+        assert abs(mom) < 0.7, (
+            f"Expected stationary series to have |momentum| < 0.7, got {mom}"
+        )
+
     def test_classify_market_regime_empty_df(self):
         """Empty corr_df → 'neutral'."""
         from sector_flow.analysis.regime import classify_market_regime

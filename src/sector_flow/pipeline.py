@@ -147,12 +147,8 @@ def run_daily(lookback_days: int = 1, database_url: Optional[str] = None) -> dic
 
 
 def _to_float(val) -> float | None:
-    import math
-    try:
-        f = float(val)
-        return None if math.isnan(f) else f
-    except (TypeError, ValueError):
-        return None
+    from sector_flow.collectors.ssga_collector import _to_float as _ssga_to_float
+    return _ssga_to_float(val)
 
 
 def backfill(days: Optional[int] = None, database_url: Optional[str] = None) -> dict:

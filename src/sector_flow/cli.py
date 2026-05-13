@@ -161,6 +161,17 @@ def show_flows(db: str | None):
 
 
 @main.command()
+@click.option("--api-url", default="http://localhost:8000", show_default=True, help="FastAPI base URL")
+@click.option("--port", default=8050, show_default=True, type=int, help="Dash server port")
+@click.option("--debug/--no-debug", default=False, help="Enable Dash debug mode")
+def dashboard(api_url: str, port: int, debug: bool):
+    """Start the interactive Dash dashboard (expects API running on --api-url)."""
+    from sector_flow.visualizations.dashboard import run_dashboard
+    click.echo(f"Starting dashboard on http://0.0.0.0:{port}  (API: {api_url})")
+    run_dashboard(api_url=api_url, port=port, debug=debug)
+
+
+@main.command()
 @click.option("--host", default=None, help="Bind host (default: from settings)")
 @click.option("--port", default=None, type=int, help="Bind port (default: from settings)")
 @click.option("--reload", is_flag=True, default=False, help="Enable auto-reload (dev mode)")

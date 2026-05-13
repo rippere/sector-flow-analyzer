@@ -1,0 +1,15 @@
+[Unit]
+Description=Sector Flow Analyzer — daily analysis engine run
+After=sector-flow-ingest.service
+Requires=sector-flow-ingest.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/mnt/external/Projects/sector-flow-analyzer
+Environment="HOME=/home/rippere"
+Environment="PYTHONUNBUFFERED=1"
+Environment="DATABASE_URL=sqlite:////home/rippere/.sector_flow/sector_flow.db"
+UnsetEnvironment=CLAUDECODE
+ExecStart=/mnt/external/Projects/sector-flow-analyzer/.venv/bin/sector-flow analyze
+StandardOutput=append:/home/rippere/.sector_flow/logs/cron.log
+StandardError=append:/home/rippere/.sector_flow/logs/cron.log

@@ -1,0 +1,78 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: uvicorn sector_flow.api.app:app --host 0.0.0.0 --port 8000 --log-level warning
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:////data/sector_flow.db
+    volumes:
+      - sector_flow_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  dashboard:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: sector-flow dashboard --no-debug --port 8050 --api-url http://api:8000
+    ports:
+      - "8050:8050"
+    environment:
+      - API_URL=http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  osc-bridge:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: sector-flow osc-bridge --api-url http://api:8000 --osc-host host.docker.internal --osc-port 9000 --interval 1
+    network_mode: host
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - osc
+
+  ingest:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: sector-flow ingest
+    environment:
+      - DATABASE_URL=sqlite:////data/sector_flow.db
+    volumes:
+      - sector_flow_data:/data
+    depends_on:
+      api:
+        condition: service_healthy
+    profiles:
+      - cron
+
+  analyze:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: sector-flow analyze
+    environment:
+      - DATABASE_URL=sqlite:////data/sector_flow.db
+    volumes:
+      - sector_flow_data:/data
+    depends_on:
+      api:
+        condition: service_healthy
+    profiles:
+      - cron
+
+volumes:
+  sector_flow_data:

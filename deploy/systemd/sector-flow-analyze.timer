@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily analysis engine — 8:35am ET (13:35 UTC) Mon–Fri, after ingest
+
+[Timer]
+OnCalendar=Mon..Fri 13:35:00 UTC
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target.wants

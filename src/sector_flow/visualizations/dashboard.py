@@ -331,28 +331,89 @@ def build_price_chart(prices: list[dict], ticker: str, regime: str | None) -> go
     return fig
 
 
-def build_flow_table(sectors: list[dict]) -> html.Div:
-    """Flow table or placeholder message."""
-    flow_data = []
-    for s in sectors:
-        # net_inflow_usd is not in SectorSummary directly; we check if it exists
-        # The price endpoint has it per-row; here we use what sectors gives us
-        pass
+def build_flow_table(sectors: list[dict], api_url: str = "") -> html.Div:
+    """
+    Flow table. Shows real net_inflow_usd if SSGA data exists, otherwise
+    shows momentum-ranked table as proxy with a 'pending' label.
+    """
+    # Try to get the latest net_inflow_usd for each sector from the flows endpoint
+    flow_rows: list[dict] = []
+    has_real_flow = False
 
-    # SectorSummary does not expose net_inflow_usd directly — show placeholder
-    # (would need to call /sectors/{ticker}/prices and take latest row)
-    return html.Div(
+    for s in sectors:
+        ticker = s["ticker"]
+        flow_val = None
+        if api_url:
+            flows = _get(f"{api_url}/sectors/{ticker}/flows", timeout=5) or []
+            if flows:
+                latest = flows[-1]
+                flow_val = latest.get("net_inflow_usd")
+                if flow_val is not None:
+                    has_real_flow = True
+        flow_rows.append({
+            "ticker": ticker,
+            "sector_name": SECTOR_NAMES.get(ticker, ticker),
+            "regime": s.get("regime") or "n/a",
+            "momentum": s.get("momentum") or 0.0,
+            "flow": flow_val,
+        })
+
+    # Sort: by real flow if available, else by momentum
+    if has_real_flow:
+        flow_rows.sort(key=lambda r: r["flow"] or 0.0, reverse=True)
+        header_label = "Net Flow (USD M)"
+        subtitle = None
+    else:
+        flow_rows.sort(key=lambda r: r["momentum"], reverse=True)
+        header_label = "Momentum (proxy)"
+        subtitle = html.P(
+            "SSGA flow data accumulates daily. Run `sector-flow ingest` to populate real figures.",
+            style={"color": TEXT_MUTED, "fontSize": "11px", "marginBottom": "8px", "fontStyle": "italic"},
+        )
+
+    rows = []
+    for i, r in enumerate(flow_rows, 1):
+        regime_color = _regime_color(r["regime"])
+        if has_real_flow and r["flow"] is not None:
+            val_m = r["flow"] / 1_000_000
+            val_str = f"${val_m:+,.1f}M"
+            direction = "↑" if r["flow"] >= 0 else "↓"
+            dir_color = "#00C853" if r["flow"] >= 0 else "#D50000"
+        else:
+            val_str = f"{r['momentum']:+.3f}"
+            direction = "↑" if r["momentum"] >= 0 else "↓"
+            dir_color = "#00C853" if r["momentum"] >= 0 else "#D50000"
+
+        rows.append(
+            html.Tr([
+                html.Td(str(i), style={"color": TEXT_MUTED, "fontSize": "12px", "padding": "4px 6px"}),
+                html.Td(
+                    r["ticker"],
+                    style={"color": regime_color, "fontWeight": "600", "fontSize": "12px", "padding": "4px 6px"},
+                ),
+                html.Td(val_str, style={"color": TEXT_PRIMARY, "fontSize": "12px", "padding": "4px 6px", "textAlign": "right"}),
+                html.Td(direction, style={"color": dir_color, "fontSize": "14px", "padding": "4px 6px", "textAlign": "center"}),
+            ])
+        )
+
+    table = html.Table(
         [
-            html.P(
-                "Flow data accumulates daily via SSGA ingestion.",
-                style={"color": TEXT_MUTED, "fontSize": "12px", "marginTop": "8px"},
-            ),
-            html.P(
-                "Run `sector-flow ingest` to populate net flow figures.",
-                style={"color": TEXT_MUTED, "fontSize": "12px"},
-            ),
-        ]
+            html.Thead(html.Tr([
+                html.Th("#", style={"color": TEXT_MUTED, "fontSize": "11px", "padding": "4px 6px", "textAlign": "left"}),
+                html.Th("Ticker", style={"color": TEXT_MUTED, "fontSize": "11px", "padding": "4px 6px", "textAlign": "left"}),
+                html.Th(header_label, style={"color": TEXT_MUTED, "fontSize": "11px", "padding": "4px 6px", "textAlign": "right"}),
+                html.Th("Dir", style={"color": TEXT_MUTED, "fontSize": "11px", "padding": "4px 6px", "textAlign": "center"}),
+            ])),
+            html.Tbody(rows),
+        ],
+        style={"width": "100%", "borderCollapse": "collapse"},
     )
+
+    children = []
+    if subtitle:
+        children.append(subtitle)
+    children.append(table)
+    return html.Div(children)
 
 
 # ---------------------------------------------------------------------------
@@ -627,9 +688,10 @@ def create_app(api_url: str = "http://localhost:8000") -> Dash:
     @app.callback(
         Output("flow-table", "children"),
         Input("sectors-store", "data"),
+        State("api-url-store", "data"),
     )
-    def update_flow_table(sectors):
-        return build_flow_table(sectors or [])
+    def update_flow_table(sectors, stored_api_url):
+        return build_flow_table(sectors or [], api_url=stored_api_url or api_url)
 
     @app.callback(
         Output("selected-ticker-store", "data"),

@@ -1,0 +1,22 @@
+[Unit]
+Description=Sector Flow Analyzer — Dash visualization dashboard
+After=sector-flow-api.service
+Requires=sector-flow-api.service
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/external/Projects/sector-flow-analyzer
+Environment="HOME=/home/rippere"
+Environment="PYTHONUNBUFFERED=1"
+UnsetEnvironment=CLAUDECODE
+ExecStart=/mnt/external/Projects/sector-flow-analyzer/.venv/bin/sector-flow \
+    dashboard --no-debug --port 8050 --api-url http://127.0.0.1:8000
+Restart=on-failure
+RestartSec=15s
+StartLimitBurst=5
+StartLimitIntervalSec=300
+StandardOutput=append:/home/rippere/.sector_flow/logs/dashboard.log
+StandardError=append:/home/rippere/.sector_flow/logs/dashboard.log
+
+[Install]
+WantedBy=default.target

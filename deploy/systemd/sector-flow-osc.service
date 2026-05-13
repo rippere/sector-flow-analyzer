@@ -1,0 +1,26 @@
+[Unit]
+Description=Sector Flow Analyzer — OSC bridge for nw_wrld VJ platform
+After=sector-flow-api.service
+Requires=sector-flow-api.service
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/external/Projects/sector-flow-analyzer
+Environment="HOME=/home/rippere"
+Environment="PYTHONUNBUFFERED=1"
+UnsetEnvironment=CLAUDECODE
+ExecStart=/mnt/external/Projects/sector-flow-analyzer/.venv/bin/sector-flow \
+    osc-bridge \
+    --api-url http://127.0.0.1:8000 \
+    --osc-host 127.0.0.1 \
+    --osc-port 9000 \
+    --interval 1
+Restart=on-failure
+RestartSec=10s
+StartLimitBurst=5
+StartLimitIntervalSec=300
+StandardOutput=append:/home/rippere/.sector_flow/logs/osc.log
+StandardError=append:/home/rippere/.sector_flow/logs/osc.log
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,26 @@
+[Unit]
+Description=Sector Flow Analyzer — FastAPI REST + WebSocket
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/external/Projects/sector-flow-analyzer
+Environment="HOME=/home/rippere"
+Environment="PYTHONUNBUFFERED=1"
+Environment="DATABASE_URL=sqlite:////home/rippere/.sector_flow/sector_flow.db"
+UnsetEnvironment=CLAUDECODE
+ExecStart=/mnt/external/Projects/sector-flow-analyzer/.venv/bin/uvicorn \
+    sector_flow.api.app:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --log-level warning
+Restart=on-failure
+RestartSec=10s
+StartLimitBurst=5
+StartLimitIntervalSec=300
+StandardOutput=append:/home/rippere/.sector_flow/logs/api.log
+StandardError=append:/home/rippere/.sector_flow/logs/api.log
+
+[Install]
+WantedBy=default.target

@@ -1,24 +1,21 @@
 """
-Phase 5 integration tests — OSC bridge, Prometheus metrics, Alfred query CLI.
+Phase 5 integration tests — OSC bridge, Alfred query CLI.
 
 All external calls are mocked. The API layer tests use the same in-memory
 SQLite setup as the Phase 3 test suite.
+
+Note: Prometheus /metrics endpoint was removed (Step 6) — unscraped in a
+single-user project, not worth the maintenance surface.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
-import pytest_asyncio
 from click.testing import CliRunner
-from httpx import AsyncClient, ASGITransport
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
-from sector_flow.database.models import Base, SECTOR_ETFS, SectorETF, PriceData
+from sector_flow.database.models import SECTOR_ETFS
 
 
 # ---------------------------------------------------------------------------
@@ -26,71 +23,6 @@ from sector_flow.database.models import Base, SECTOR_ETFS, SectorETF, PriceData
 # ---------------------------------------------------------------------------
 
 
-def _make_seeded_engine():
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    session = Session()
-
-    base_date = datetime(2024, 1, 2)
-    for ticker, sector_name, sector_code in SECTOR_ETFS:
-        etf = SectorETF(ticker=ticker, sector_name=sector_name, sector_code=sector_code)
-        session.add(etf)
-        session.flush()
-        for i in range(60):
-            session.add(
-                PriceData(
-                    etf_id=etf.id,
-                    date=base_date + timedelta(days=i),
-                    open=100.0 + i * 0.1,
-                    high=102.0 + i * 0.1,
-                    low=99.0 + i * 0.1,
-                    close=101.0 + i * 0.1,
-                    volume=1_000_000.0,
-                    adjusted_close=101.0 + i * 0.1,
-                )
-            )
-
-    session.commit()
-    session.close()
-    return engine
-
-
-def _make_override(engine):
-    TestSession = sessionmaker(bind=engine)
-
-    def override_get_db():
-        session = TestSession()
-        try:
-            yield session
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            session.close()
-
-    return override_get_db
-
-
-def _patch_session_globals(engine):
-    import sector_flow.database.session as sess_mod
-    orig_engine = sess_mod._engine
-    orig_factory = sess_mod._SessionFactory
-    TestSession = sessionmaker(bind=engine)
-    sess_mod._engine = engine
-    sess_mod._SessionFactory = TestSession
-    return orig_engine, orig_factory
-
-
-def _restore_session_globals(orig_engine, orig_factory):
-    import sector_flow.database.session as sess_mod
-    sess_mod._engine = orig_engine
-    sess_mod._SessionFactory = orig_factory
 
 
 # ---------------------------------------------------------------------------
@@ -98,38 +30,6 @@ def _restore_session_globals(orig_engine, orig_factory):
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture()
-def seeded_engine():
-    engine = _make_seeded_engine()
-    yield engine
-    Base.metadata.drop_all(engine)
-    engine.dispose()
-
-
-@pytest.fixture()
-def app_with_analysis(seeded_engine):
-    from sector_flow.api.app import app
-    from sector_flow.api.deps import get_db
-    from sector_flow.analysis.engine import run_analysis
-
-    orig_engine, orig_factory = _patch_session_globals(seeded_engine)
-    run_analysis()
-
-    app.dependency_overrides[get_db] = _make_override(seeded_engine)
-    yield app, seeded_engine
-
-    app.dependency_overrides.clear()
-    _restore_session_globals(orig_engine, orig_factory)
-
-
-@pytest.fixture()
-def app_with_db(seeded_engine):
-    from sector_flow.api.app import app
-    from sector_flow.api.deps import get_db
-
-    app.dependency_overrides[get_db] = _make_override(seeded_engine)
-    yield app, seeded_engine
-    app.dependency_overrides.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -264,46 +164,10 @@ def test_osc_bridge_sends_expected_addresses():
 
 
 # ---------------------------------------------------------------------------
-# Deliverable 2: Prometheus /metrics endpoint
+# Deliverable 2 (removed): Prometheus /metrics endpoint
+# The /metrics endpoint was removed in Step 6 — unscraped, single-user
+# project, not worth the maintenance surface.
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_prometheus_metrics_endpoint_status_and_content_type(app_with_db):
-    """GET /metrics returns 200 with text/plain content-type."""
-    app, _ = app_with_db
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        resp = await ac.get("/metrics")
-
-    assert resp.status_code == 200
-    assert "text/plain" in resp.headers["content-type"]
-
-
-@pytest.mark.asyncio
-async def test_prometheus_metrics_contains_expected_keys(app_with_analysis):
-    """GET /metrics body contains all required metric names."""
-    app, _ = app_with_analysis
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        resp = await ac.get("/metrics")
-
-    body = resp.text
-    assert "sector_flow_momentum" in body
-    assert "sector_flow_regime_code" in body
-    assert "sector_flow_cohesion" in body
-    assert "sector_flow_significant_pairs" in body
-    assert "sector_flow_data_freshness_seconds" in body
-
-
-@pytest.mark.asyncio
-async def test_prometheus_metrics_contains_ticker_labels(app_with_analysis):
-    """Metric lines include ticker labels for known sector ETFs."""
-    app, _ = app_with_analysis
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        resp = await ac.get("/metrics")
-
-    body = resp.text
-    for ticker in ("XLK", "XLF", "XLE"):
-        assert f'ticker="{ticker}"' in body, f"Expected ticker label for {ticker}"
 
 
 # ---------------------------------------------------------------------------

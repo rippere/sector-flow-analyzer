@@ -417,6 +417,117 @@ def build_flow_table(sectors: list[dict], api_url: str = "") -> html.Div:
 
 
 # ---------------------------------------------------------------------------
+# Data health panel
+# ---------------------------------------------------------------------------
+
+
+def build_data_health_panel(sectors: list[dict]) -> html.Div:
+    """
+    Build the Data Health panel content from the /sectors response.
+
+    Shows:
+    - Last ingestion date (most recent latest_date across all ETFs)
+    - Flow data coverage (count of sectors with non-null row_count > 0)
+    - Analysis window (hardcoded — not surfaced in /sectors)
+    - Colored staleness indicator (green < 2 trading days, yellow 2-5, red > 5)
+
+    All data is derived from the existing /sectors endpoint — no new API call.
+    """
+    from datetime import date as date_type, timedelta
+
+    if not sectors:
+        return html.Div(
+            "No data available.",
+            style={"color": TEXT_MUTED, "fontSize": "12px"},
+        )
+
+    # --- Last ingestion date ---
+    latest_dates = [s.get("latest_date") for s in sectors if s.get("latest_date")]
+    if latest_dates:
+        most_recent_str = max(latest_dates)  # ISO date string from API, max() works lexicographically
+        last_ingestion = most_recent_str
+    else:
+        last_ingestion = "unknown"
+
+    # --- Staleness indicator ---
+    staleness_color = "#90A4AE"  # grey default
+    staleness_label = "unknown"
+    trading_days_stale = None
+
+    if latest_dates:
+        try:
+            from datetime import datetime as dt_cls
+            # latest_date comes from API as "YYYY-MM-DDTHH:MM:SS" or "YYYY-MM-DD"
+            raw = most_recent_str[:10]  # take date portion
+            latest_dt = date_type.fromisoformat(raw)
+            today = date_type.today()
+            cal_days = (today - latest_dt).days
+            # Rough trading-day conversion: ~5/7 of calendar days
+            trading_days_stale = max(0, round(cal_days * 5 / 7))
+        except (ValueError, TypeError):
+            trading_days_stale = None
+
+    if trading_days_stale is not None:
+        if trading_days_stale < 2:
+            staleness_color = "#00C853"   # green
+            staleness_label = f"{trading_days_stale} trading day(s) ago — current"
+        elif trading_days_stale <= 5:
+            staleness_color = "#FFD600"   # yellow
+            staleness_label = f"~{trading_days_stale} trading days ago — slightly stale"
+        else:
+            staleness_color = "#D50000"   # red
+            staleness_label = f"~{trading_days_stale} trading days ago — stale, run ingest"
+
+    # --- Flow coverage (sectors with row_count > 0 as proxy for flow data) ---
+    # The /sectors response returns row_count; SSGA data gets merged into the same rows
+    sectors_with_data = sum(1 for s in sectors if (s.get("row_count") or 0) > 0)
+    total_sectors = len(sectors)
+    flow_coverage = f"{sectors_with_data}/{total_sectors} sectors have price data"
+
+    # Analysis window is fixed in config — not surfaced by /sectors
+    analysis_window = "30-day correlation / 20-day momentum"
+
+    # --- Build indicator dot ---
+    dot = html.Span(
+        "●",
+        style={
+            "color": staleness_color,
+            "fontSize": "14px",
+            "marginRight": "6px",
+        },
+    )
+
+    def _row(label: str, value: str | html.Span) -> html.Div:
+        return html.Div(
+            style={"display": "flex", "alignItems": "center", "marginBottom": "4px"},
+            children=[
+                html.Span(
+                    f"{label}:",
+                    style={"color": TEXT_MUTED, "fontSize": "12px", "width": "140px", "flexShrink": "0"},
+                ),
+                html.Span(
+                    value,
+                    style={"color": TEXT_PRIMARY, "fontSize": "12px"},
+                ),
+            ],
+        )
+
+    staleness_cell = html.Span(
+        [dot, html.Span(staleness_label, style={"color": TEXT_PRIMARY, "fontSize": "12px"})],
+    )
+
+    return html.Div(
+        style={"display": "flex", "flexDirection": "column", "gap": "2px"},
+        children=[
+            _row("Last ingestion", last_ingestion),
+            _row("Staleness", staleness_cell),
+            _row("Flow data", flow_coverage),
+            _row("Analysis window", analysis_window),
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Layout helpers
 # ---------------------------------------------------------------------------
 
@@ -530,6 +641,39 @@ def create_app(api_url: str = "http://localhost:8000") -> Dash:
             # Error banner (hidden when healthy)
             # ----------------------------------------------------------------
             html.Div(id="error-banner"),
+
+            # ----------------------------------------------------------------
+            # Data Health panel (collapsible, above main body)
+            # ----------------------------------------------------------------
+            html.Details(
+                style={
+                    "margin": "12px 24px 0",
+                    "backgroundColor": BG_PANEL,
+                    "border": f"1px solid {BORDER_COLOR}",
+                    "borderRadius": "8px",
+                    "padding": "0",
+                    "overflow": "hidden",
+                },
+                children=[
+                    html.Summary(
+                        "Data Health",
+                        style={
+                            "color": TEXT_MUTED,
+                            "fontSize": "12px",
+                            "fontWeight": "600",
+                            "letterSpacing": "0.05em",
+                            "cursor": "pointer",
+                            "padding": "8px 14px",
+                            "userSelect": "none",
+                            "listStyle": "none",
+                        },
+                    ),
+                    html.Div(
+                        id="data-health-panel",
+                        style={"padding": "8px 16px 12px"},
+                    ),
+                ],
+            ),
 
             # ----------------------------------------------------------------
             # Main two-column body
@@ -669,6 +813,13 @@ def create_app(api_url: str = "http://localhost:8000") -> Dash:
             ]
         )
         return badge, stats
+
+    @app.callback(
+        Output("data-health-panel", "children"),
+        Input("sectors-store", "data"),
+    )
+    def update_data_health(sectors):
+        return build_data_health_panel(sectors or [])
 
     @app.callback(
         Output("network-graph", "figure"),

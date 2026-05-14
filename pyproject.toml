@@ -40,6 +40,7 @@ dependencies = [
     "pydantic-settings>=2.1.0",
     "python-dotenv>=1.0.0",
     "loguru>=0.7.2",
+    "aiofiles>=23.0.0",
     "requests>=2.31.0",
     "click>=8.1.0",
     "python-osc>=1.8.0",

@@ -4,10 +4,16 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
+import pathlib
+
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from sector_flow.database.session import init_db
 from sector_flow.api.routers import sectors, analysis, pipeline, ws as ws_router
+
+_STATIC_DIR = pathlib.Path(__file__).parent.parent / "static"
 
 
 @asynccontextmanager
@@ -33,7 +39,14 @@ app.include_router(analysis.router)
 app.include_router(pipeline.router)
 app.include_router(ws_router.router)
 
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
 
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/dashboard")
+def dashboard() -> RedirectResponse:
+    return RedirectResponse(url="/static/dashboard.html")

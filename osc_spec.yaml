@@ -1,8 +1,17 @@
-version: "1.0"
+version: "2.0"
 description: >
   OSC address schema for Sector Flow Analyzer → nw_wrld VJ Platform bridge.
   This file is the interface contract. Both sides must implement against it.
   Do not change addresses without bumping the version and updating both ends.
+
+  v2.0 changes from v1.0:
+    REMOVED: /sector/{ticker}/weight, /sector/{ticker}/flow_in,
+             /sector/{ticker}/flow_out, /sector/{ticker}/momentum,
+             /sector/{ticker}/regime, /meta/regime
+    ADDED:   /sector/{ticker}/flow_volume, /sector/{ticker}/momentum_rank,
+             /sector/{ticker}/aum
+    REASON:  Moved to objective-first data model. Regime labels removed from
+             primary output; raw flow data is now the authoritative signal.
 
 transport:
   protocol: UDP
@@ -14,45 +23,36 @@ addresses:
 
   # --- Per-sector state ---
 
-  /sector/{ticker}/weight:
+  /sector/{ticker}/flow_volume:
+    type: float
+    unit: USD
+    range: [-inf, +inf]
+    null_behavior: sent as 0.0 when SSGA data not yet ingested
+    description: >
+      Signed net capital flow into this sector ETF for the most recent trading
+      day. Positive = inflow (shares_outstanding increased × NAV). Negative =
+      outflow. Sourced directly from SSGA daily Excel snapshot.
+    example: /sector/XLK/flow_volume  2300000000.0f
+
+  /sector/{ticker}/momentum_rank:
     type: float
     range: [0.0, 1.0]
+    null_behavior: all sectors return 0.5 if momentum data unavailable
     description: >
-      Normalized covariance coupling strength for this sector vs. the market-weighted
-      average. 1.0 = maximum cohesion, 0.0 = fully decoupled.
-    example: /sector/XLK/weight  0.82f
+      Cross-sectional min-max normalized 20-day price momentum. The sector with
+      the highest momentum among all 11 sectors gets 1.0; the lowest gets 0.0.
+      This is a relative rank, not an absolute signal.
+    example: /sector/XLE/momentum_rank  0.18f
 
-  /sector/{ticker}/flow_in:
+  /sector/{ticker}/aum:
     type: float
-    unit: USD_millions
+    unit: USD
     range: [0.0, +inf]
+    null_behavior: sent as 0.0 when SSGA data not yet ingested
     description: >
-      Net inflow into this sector ETF over the configured window (default: 1 day).
-      Sourced from real fund flow data when available; falls back to 0.0 if NULL.
-    example: /sector/XLF/flow_in  412.5f
-
-  /sector/{ticker}/flow_out:
-    type: float
-    unit: USD_millions
-    range: [0.0, +inf]
-    description: Net outflow from this sector ETF over the configured window.
-    example: /sector/XLF/flow_out  87.3f
-
-  /sector/{ticker}/momentum:
-    type: float
-    range: [-1.0, 1.0]
-    description: >
-      Signed 20-day price momentum normalized to [-1, 1].
-      Positive = trending up, negative = trending down.
-    example: /sector/XLE/momentum  -0.34f
-
-  /sector/{ticker}/regime:
-    type: string
-    values: ["accumulation", "distribution", "neutral", "breakout", "breakdown"]
-    description: >
-      Current regime classification for this sector based on
-      price/volume/flow signal combination. Used to drive particle behavior.
-    example: /sector/XLK/regime  "accumulation"
+      Total net assets (AUM) of this sector ETF in USD. Sourced from SSGA daily
+      Excel snapshot. Use this to scale node size in visual representations.
+    example: /sector/XLK/aum  58000000000.0f
 
   # --- Pairwise sector relationships ---
 
@@ -60,44 +60,41 @@ addresses:
     type: float
     range: [-1.0, 1.0]
     description: >
-      Rolling Pearson correlation between the two sectors over the configured window.
+      Rolling 30-day Pearson correlation between the two sectors.
       Drives edge thickness in the network visualization.
-      ticker_a < ticker_b alphabetically to avoid duplicate pairs.
+      ticker_a < ticker_b alphabetically; only significant pairs (|corr| >= 0.3)
+      are broadcast.
     example: /sector/pair/XLF/XLK/correlation  0.74f
 
   /sector/pair/{ticker_a}/{ticker_b}/flow_direction:
     type: float
     range: [-1.0, 1.0]
+    null_behavior: sent as 0.0 when net_inflow_usd is unavailable for either sector
     description: >
-      Signed estimate of capital rotation direction between the two sectors.
+      Signed estimate of capital rotation direction between two sectors, scaled
+      by their correlation strength. Formula:
+        (net_inflow_a - net_inflow_b) / max_abs_inflow * |correlation|
       Positive = net flow from ticker_b toward ticker_a.
       Negative = net flow from ticker_a toward ticker_b.
-      Derived from relative flow differential when real flow data is available.
     example: /sector/pair/XLE/XLF/flow_direction  -0.61f
 
   # --- Market-level meta ---
-
-  /meta/regime:
-    type: string
-    values: ["risk_on", "risk_off", "rotation", "neutral", "crisis"]
-    description: >
-      Aggregate market regime derived from cross-sector covariance structure.
-      risk_on = growth sectors leading, risk_off = defensive sectors leading,
-      rotation = high inter-sector divergence, crisis = all correlations converging to 1.
-    example: /meta/regime  "rotation"
 
   /meta/cohesion:
     type: float
     range: [0.0, 1.0]
     description: >
-      Average pairwise correlation across all 55 sector pairs.
-      High cohesion (>0.8) often signals crisis/macro-driven moves.
-      Low cohesion (<0.3) signals sector-specific rotation.
+      Mean absolute pairwise correlation across all sector pairs in the current
+      snapshot. High cohesion (>0.8) = sectors moving together (macro-driven).
+      Low cohesion (<0.3) = sector-specific rotation.
     example: /meta/cohesion  0.41f
 
   /meta/dominant_sector:
     type: string
-    description: Ticker of the sector with the highest net inflow over the window.
+    null_behavior: empty string if no flow data available
+    description: >
+      Ticker of the sector with the largest absolute net_inflow_usd in the
+      current snapshot. Objective data — no regime interpretation.
     example: /meta/dominant_sector  "XLK"
 
   /meta/timestamp:
@@ -110,11 +107,11 @@ addresses:
 
   /control/heartbeat:
     type: int
-    description: Sent every 5 seconds. Value is Unix timestamp. VJ platform should alert if missed for >15s.
+    description: Unix timestamp sent every interval_seconds. VJ platform should alert if missed for >15s.
 
   /control/data_staleness_seconds:
     type: int
-    description: Seconds since the last successful data fetch. Drive visual degradation if >3600.
+    description: Seconds since the OSC bridge started. Use to detect stale sessions.
 
   /control/mode:
     type: string

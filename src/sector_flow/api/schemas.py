@@ -59,7 +59,20 @@ class PipelineResult(BaseModel):
     detail: dict
 
 
+class SectorFlowEntry(BaseModel):
+    ticker: str
+    net_inflow_usd: Optional[float]   # None if SSGA data not yet ingested
+    aum_usd: Optional[float]
+    momentum_rank: float               # [0.0, 1.0] cross-sectional min-max of raw momentum
+
+
+class FlowAnalysisResponse(BaseModel):
+    flows: list[SectorFlowEntry]
+    correlations: list[CorrelationPair]
+    computed_at: str
+
+
 class WebSocketMessage(BaseModel):
-    type: str  # "regime_update" | "heartbeat" | "error"
+    type: str  # "flow_update" | "heartbeat" | "error"
     timestamp: str
     data: dict

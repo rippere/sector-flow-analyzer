@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Sector Flow Analyzer</title>
+  <script src="https://unpkg.com/force-graph@1.43.5/dist/force-graph.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0d1117; color: #e6edf3; font-family: monospace; overflow: hidden; }
+    #graph { width: 100vw; height: 100vh; }
+
+    #hud {
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      background: rgba(22, 27, 34, 0.85);
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 12px 16px;
+      font-size: 11px;
+      line-height: 1.8;
+      pointer-events: none;
+      min-width: 200px;
+    }
+    #hud .label { color: #8b949e; }
+    #hud .value { color: #58a6ff; }
+    #hud .no-data { color: #f0883e; }
+
+    #legend {
+      position: absolute;
+      bottom: 16px;
+      left: 16px;
+      background: rgba(22, 27, 34, 0.85);
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: 10px;
+      line-height: 2;
+      pointer-events: none;
+    }
+    #legend .row { display: flex; align-items: center; gap: 8px; }
+    #legend .swatch { width: 24px; height: 3px; border-radius: 2px; }
+
+    #tooltip {
+      position: absolute;
+      background: rgba(22, 27, 34, 0.95);
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: 11px;
+      line-height: 1.7;
+      pointer-events: none;
+      display: none;
+    }
+    #tooltip .t-ticker { font-size: 14px; font-weight: bold; margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+  <div id="graph"></div>
+
+  <div id="hud">
+    <div><span class="label">SECTOR FLOW ANALYZER</span></div>
+    <div><span class="label">cohesion  </span><span class="value" id="hud-cohesion">—</span></div>
+    <div><span class="label">dominant  </span><span class="value" id="hud-dominant">—</span></div>
+    <div><span class="label">updated   </span><span class="value" id="hud-ts">—</span></div>
+    <div><span class="label">flows     </span><span id="hud-flows">—</span></div>
+  </div>
+
+  <div id="legend">
+    <div class="row"><div class="swatch" style="background:#58a6ff"></div><span>positive correlation</span></div>
+    <div class="row"><div class="swatch" style="background:#ff7043"></div><span>negative correlation</span></div>
+    <div class="row" style="margin-top:4px"><div class="swatch" style="background:#3fb950"></div><span>net inflow</span></div>
+    <div class="row"><div class="swatch" style="background:#f85149"></div><span>net outflow</span></div>
+    <div class="row" style="margin-top:4px; color:#8b949e"><span>arc = momentum rank &nbsp;|&nbsp; size = AUM</span></div>
+  </div>
+
+  <div id="tooltip"></div>
+
+  <script>
+    const SECTOR_COLORS = {
+      // US equity sectors
+      XLK:  "#58a6ff",  // Technology — blue
+      XLF:  "#f0a500",  // Financials — amber
+      XLE:  "#ff7043",  // Energy — orange
+      XLV:  "#66bb6a",  // Healthcare — green
+      XLY:  "#ab47bc",  // Consumer Discretionary — purple
+      XLP:  "#26c6da",  // Consumer Staples — cyan
+      XLI:  "#ffa726",  // Industrials — light orange
+      XLB:  "#8d6e63",  // Materials — brown
+      XLRE: "#ef5350",  // Real Estate — red
+      XLU:  "#ffee58",  // Utilities — yellow
+      XLC:  "#ec407a",  // Communication Services — pink
+      // Macro context — white/silver palette to visually distinguish from sectors
+      SPY:  "#e6edf3",  // S&P 500 — white
+      GLD:  "#ffd700",  // Gold — gold
+      TLT:  "#a5d6ff",  // 20yr Treasuries — pale blue
+      SPEM: "#c084fc",  // Emerging Markets — violet
+    };
+
+    const SECTOR_NAMES = {
+      XLK: "Technology",   XLF: "Financials",  XLE: "Energy",
+      XLV: "Healthcare",   XLY: "Cons. Discr.", XLP: "Cons. Staples",
+      XLI: "Industrials",  XLB: "Materials",   XLRE: "Real Estate",
+      XLU: "Utilities",    XLC: "Communication",
+      SPY: "S&P 500", GLD: "Gold", TLT: "20yr Treasury", SPEM: "Emerg. Mkts",
+    };
+
+    const MACRO_TICKERS = new Set(["SPY", "GLD", "TLT", "SPEM"]);
+
+    const MIN_R = 14, MAX_R = 46;
+    const MACRO_MIN_R = 12, MACRO_MAX_R = 34;
+
+    // Two-ring layout: sectors on inner ring, macro on outer ring
+    const SECTOR_ORDER = [
+      "XLK", "XLC", "XLF", "XLI", "XLB",
+      "XLE", "XLU", "XLRE", "XLP", "XLV", "XLY"
+    ];
+    const MACRO_ORDER = ["SPY", "GLD", "TLT", "SPEM"];
+
+    function circlePositions() {
+      const W = window.innerWidth, H = window.innerHeight;
+      const cx = W / 2, cy = H / 2;
+      const innerR = Math.min(W, H) * 0.30;
+      const outerR = Math.min(W, H) * 0.46;
+      const positions = {};
+
+      SECTOR_ORDER.forEach((ticker, i) => {
+        const angle = (i / SECTOR_ORDER.length) * 2 * Math.PI - Math.PI / 2;
+        positions[ticker] = { fx: cx + innerR * Math.cos(angle), fy: cy + innerR * Math.sin(angle) };
+      });
+
+      // Macro nodes spaced evenly on outer ring, rotated 45° offset so they sit
+      // between sector nodes rather than directly behind them
+      MACRO_ORDER.forEach((ticker, i) => {
+        const angle = (i / MACRO_ORDER.length) * 2 * Math.PI - Math.PI / 2 + Math.PI / 4;
+        positions[ticker] = { fx: cx + outerR * Math.cos(angle), fy: cy + outerR * Math.sin(angle) };
+      });
+
+      return positions;
+    }
+
+    let fixedPos = circlePositions();
+    window.addEventListener("resize", () => { fixedPos = circlePositions(); });
+
+    // --- Ambient state ---
+    let cohesionLevel = 0;      // 0–1, updated from WS/REST
+    let dominantTicker = null;  // ticker string or null
+
+    // Market hours in ET — returns [0,1] opacity multiplier
+    function marketOpacity() {
+      const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+      const day = et.getDay();           // 0=Sun 6=Sat
+      const h = et.getHours();
+      const m = et.getMinutes();
+      const mins = h * 60 + m;
+      const isWeekday = day >= 1 && day <= 5;
+      const inSession = mins >= 9 * 60 + 30 && mins < 16 * 60;
+      return isWeekday && inSession ? 1.0 : 0.28;
+    }
+
+    function fmt_usd(v) {
+      if (v == null) return "no data";
+      const abs = Math.abs(v);
+      const sign = v >= 0 ? "+" : "-";
+      if (abs >= 1e9) return `${sign}$${(abs / 1e9).toFixed(2)}B`;
+      if (abs >= 1e6) return `${sign}$${(abs / 1e6).toFixed(0)}M`;
+      return `${sign}$${abs.toFixed(0)}`;
+    }
+
+    function fmt_aum(v) {
+      if (v == null) return "—";
+      if (v >= 1e9) return `$${(v / 1e9).toFixed(1)}B`;
+      return `$${(v / 1e6).toFixed(0)}M`;
+    }
+
+    // --- Animated band helpers ---
+    // norm [0,1] → base pipe width in px
+    function bandWidth(norm) {
+      return 1.5 + Math.pow(norm, 0.6) * 8.5;  // 1.5px → 10px
+    }
+    // norm [0,1] → pulse sweep duration in ms (high volume = faster)
+    function pulseDuration(norm) {
+      return 4500 - Math.pow(norm, 0.8) * 2500;  // 4500ms → 2000ms
+    }
+    // norm [0,1] → simultaneous pulses: always 1, only 2 on very high flow
+    function pulseCount(norm) {
+      return norm > 0.75 ? 2 : 1;
+    }
+
+    // Draw one animated band between two points
+    function drawBand(ctx, sx, sy, tx, ty, link) {
+      const norm = link.flow_norm ?? link.corr_norm ?? 0;
+      const corr  = link.correlation ?? 0;
+
+      // Resolve node IDs (force-graph resolves source/target to objects after first render)
+      const srcId = link.source?.id ?? link.source;
+      const tgtId = link.target?.id ?? link.target;
+
+      // Flow direction: positive flow_magnitude = money moving toward source node
+      const towardSrc = (link.flow_magnitude ?? 0) >= 0 && link.flow_magnitude != null;
+      const [fromX, fromY, toX, toY] = towardSrc
+        ? [tx, ty, sx, sy]   // pulse travels target→source
+        : [sx, sy, tx, ty];  // pulse travels source→target
+
+      const destId = towardSrc ? srcId : tgtId;
+      const destColor = SECTOR_COLORS[destId] || "#e6edf3";
+      const srcColor  = SECTOR_COLORS[towardSrc ? tgtId : srcId] || "#8b949e";
+
+      const w = bandWidth(norm);
+
+      // --- Base pipe ---
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(tx, ty);
+      ctx.lineWidth = w;
+      ctx.lineCap = "round";
+      // Pipe color — cross-asset edges rendered greyer to stay secondary
+      const mOp = marketOpacity();
+      const isCrossAsset = MACRO_TICKERS.has(srcId) !== MACRO_TICKERS.has(tgtId);
+      const isMacroMacro = MACRO_TICKERS.has(srcId) && MACRO_TICKERS.has(tgtId);
+
+      if (isCrossAsset || isMacroMacro) {
+        ctx.strokeStyle = corr >= 0
+          ? `rgba(180, 200, 220, ${(0.03 + norm * 0.07) * mOp})`
+          : `rgba(220, 180, 160, ${(0.03 + norm * 0.07) * mOp})`;
+      } else {
+        ctx.strokeStyle = corr >= 0
+          ? `rgba(88, 166, 255, ${(0.04 + norm * 0.10) * mOp})`
+          : `rgba(255, 112, 67, ${(0.04 + norm * 0.10) * mOp})`;
+      }
+      ctx.stroke();
+
+      // --- Animated pulses ---
+      const now = Date.now();
+      const dur  = pulseDuration(norm);
+      const n    = pulseCount(norm);
+      const dx = toX - fromX, dy = toY - fromY;
+      const len  = Math.sqrt(dx * dx + dy * dy);
+      if (len === 0) { ctx.restore(); return; }
+
+      for (let i = 0; i < n; i++) {
+        const t = ((now / dur) + i / n) % 1;
+        const px = fromX + dx * t;
+        const py = fromY + dy * t;
+
+        // Pulse glow radius — tight, doesn't bleed beyond the band much
+        const gr = w * 1.3 + 2;
+
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        const grd = ctx.createRadialGradient(px, py, 0, px, py, gr);
+        const pa = Math.round(0x99 * mOp).toString(16).padStart(2,"0");
+        const pb = Math.round(0xcc * mOp).toString(16).padStart(2,"0");
+        const pc = Math.round(0x44 * mOp).toString(16).padStart(2,"0");
+        grd.addColorStop(0,   `rgba(255,255,255,${0.6 * mOp})`);
+        grd.addColorStop(0.2, destColor + pb);
+        grd.addColorStop(0.6, destColor + pc);
+        grd.addColorStop(1,   "transparent");
+        ctx.beginPath();
+        ctx.arc(px, py, gr, 0, 2 * Math.PI);
+        ctx.fillStyle = grd;
+        ctx.fill();
+        ctx.restore();
+      }
+
+      ctx.restore();
+    }
+
+    // --- Graph ---
+    const Graph = ForceGraph()(document.getElementById("graph"))
+      .backgroundColor("#0d1117")
+      .d3Force("charge", null)
+      .d3Force("center", null)
+      .d3Force("link", null)
+      .autoPauseRedraw(false)
+      .onRenderFramePre((ctx) => {
+        const mOpacity = marketOpacity();
+        const W = ctx.canvas.width;
+        const H = ctx.canvas.height;
+
+        // Reset to screen space for background effects
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+        // 1. Vignette — always present, focuses attention on the circle
+        const vig = ctx.createRadialGradient(W/2, H/2, Math.min(W,H)*0.3, W/2, H/2, Math.min(W,H)*0.8);
+        vig.addColorStop(0, "transparent");
+        vig.addColorStop(1, "rgba(0,0,0,0.55)");
+        ctx.fillStyle = vig;
+        ctx.fillRect(0, 0, W, H);
+
+        // 2. Cohesion glow — blue center pulse that brightens when sectors move together
+        if (cohesionLevel > 0.25) {
+          const intensity = Math.pow((cohesionLevel - 0.25) / 0.75, 1.8) * 0.12 * mOpacity;
+          const cg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.min(W,H)*0.45);
+          cg.addColorStop(0, `rgba(88,166,255,${intensity})`);
+          cg.addColorStop(0.5, `rgba(88,166,255,${intensity * 0.3})`);
+          cg.addColorStop(1, "transparent");
+          ctx.save();
+          ctx.globalCompositeOperation = "lighter";
+          ctx.fillStyle = cg;
+          ctx.fillRect(0, 0, W, H);
+          ctx.restore();
+        }
+
+        // 3. After-hours overlay — dim wash with a small clock indicator
+        if (mOpacity < 1.0) {
+          ctx.fillStyle = "rgba(0,0,0,0.45)";
+          ctx.fillRect(0, 0, W, H);
+          // "MARKET CLOSED" label, top-center
+          ctx.font = "bold 11px monospace";
+          ctx.fillStyle = "rgba(139,148,158,0.7)";
+          ctx.textAlign = "center";
+          ctx.fillText("MARKET CLOSED", W / 2, 20);
+        }
+
+        ctx.restore();
+      })
+      .linkCanvasObjectMode(() => "replace")
+      .linkCanvasObject((link, ctx) => {
+        const src = link.source, tgt = link.target;
+        if (src.x == null || tgt.x == null) return;
+        drawBand(ctx, src.x, src.y, tgt.x, tgt.y, link);
+      })
+      .nodeCanvasObject((node, ctx) => {
+        const x = node.x, y = node.y, r = node.radius;
+        const inflow = node.net_inflow_usd;
+        const hasFlow = inflow != null;
+        const flowColor = hasFlow ? (inflow >= 0 ? "#3fb950" : "#f85149") : null;
+        const mOp = marketOpacity();
+        const momRank = node.momentum_rank ?? 0.5;
+
+        // 1. Ambient sector glow — wider, softer halo
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        const halo = ctx.createRadialGradient(x, y, r * 0.5, x, y, r * 3.0);
+        halo.addColorStop(0, node.color + "2a");
+        halo.addColorStop(1, "transparent");
+        ctx.beginPath();
+        ctx.arc(x, y, r * 3.0, 0, 2 * Math.PI);
+        ctx.fillStyle = halo;
+        ctx.fill();
+        ctx.restore();
+
+        // 2. Dominant sector — animated expanding pulse ring
+        if (dominantTicker === node.id && hasFlow) {
+          const phase = (Date.now() % 2400) / 2400;
+          const expandR = r * (1.1 + phase * 1.6);
+          const alpha = Math.round((1 - phase) * 0.55 * 255).toString(16).padStart(2, "0");
+          ctx.beginPath();
+          ctx.arc(x, y, expandR, 0, 2 * Math.PI);
+          ctx.strokeStyle = node.color + alpha;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+
+        // 3. Macro nodes — dashed outer ring
+        if (node.isMacro) {
+          ctx.beginPath();
+          ctx.arc(x, y, r + 5, 0, 2 * Math.PI);
+          ctx.strokeStyle = "rgba(230,237,243,0.28)";
+          ctx.lineWidth = 1.2;
+          ctx.setLineDash([4, 5]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+
+        // 4. Flow ring — inflow green / outflow red band just outside node edge
+        if (hasFlow) {
+          const ringW = Math.max(2, r * 0.14);
+          ctx.beginPath();
+          ctx.arc(x, y, r + ringW / 2 + (node.isMacro ? 1 : 0), 0, 2 * Math.PI);
+          ctx.strokeStyle = flowColor + "aa";
+          ctx.lineWidth = ringW;
+          ctx.stroke();
+        }
+
+        // 5. Node body — radial gradient for depth (lit from upper-left)
+        ctx.save();
+        const fill = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.05, x, y, r);
+        const opacity1 = node.isMacro ? "55" : "99";
+        const opacity2 = node.isMacro ? "22" : "44";
+        const opacity3 = node.isMacro ? "11" : "22";
+        fill.addColorStop(0,   node.color + opacity1);
+        fill.addColorStop(0.5, node.color + opacity2);
+        fill.addColorStop(1,   node.color + opacity3);
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, 2 * Math.PI);
+        ctx.fillStyle = fill;
+        ctx.fill();
+        // Node border — sector color, crisp
+        ctx.strokeStyle = node.color + (node.isMacro ? "88" : "cc");
+        ctx.lineWidth = node.isMacro ? 1 : 1.5;
+        ctx.stroke();
+        ctx.restore();
+
+        // 6. Momentum arc — clockwise from top, fraction of full circle = momentum rank
+        //    Background track (full circle, very dim)
+        ctx.beginPath();
+        ctx.arc(x, y, r + (hasFlow ? Math.max(2, r * 0.14) + 2.5 : 2.5), 0, 2 * Math.PI);
+        ctx.strokeStyle = "rgba(255,255,255,0.05)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        if (momRank > 0.02) {
+          const arcStart = -Math.PI / 2;
+          const arcEnd   = arcStart + momRank * 2 * Math.PI;
+          const arcR     = r + (hasFlow ? Math.max(2, r * 0.14) + 2.5 : 2.5);
+          ctx.save();
+          ctx.globalCompositeOperation = "lighter";
+          ctx.beginPath();
+          ctx.arc(x, y, arcR, arcStart, arcEnd);
+          // Brightness scales with rank — top performers glow brightest
+          const arcAlpha = 0.25 + momRank * 0.55;
+          const arcHex   = Math.round(arcAlpha * 255).toString(16).padStart(2, "0");
+          ctx.strokeStyle = node.color + arcHex;
+          ctx.lineWidth = 2.2;
+          ctx.lineCap = "round";
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        // 7. Ticker label — centered, white
+        const tickerSize = Math.max(10, r * 0.52);
+        ctx.font = `bold ${tickerSize}px monospace`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = "#e6edf3";
+        ctx.fillText(node.id, x, y);
+
+        // 8. Sector name below node
+        const nameSize = Math.max(9, r * 0.36);
+        const labelY = y + r + (hasFlow ? Math.max(2, r * 0.14) + 4 : 4) + 5;
+        ctx.font = `${nameSize}px monospace`;
+        ctx.fillStyle = "#8b949e";
+        ctx.textBaseline = "top";
+        ctx.fillText(SECTOR_NAMES[node.id] || node.id, x, labelY);
+
+        // 9. Flow amount below name
+        if (hasFlow) {
+          const valSize = Math.max(8, r * 0.32);
+          ctx.font = `bold ${valSize}px monospace`;
+          ctx.fillStyle = flowColor + "cc";
+          ctx.fillText(fmt_usd(inflow), x, labelY + nameSize + 3);
+        }
+      })
+      .nodePointerAreaPaint((node, color, ctx) => {
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, node.radius, 0, 2 * Math.PI);
+        ctx.fillStyle = color;
+        ctx.fill();
+      })
+      .onNodeHover(node => {
+        const tip = document.getElementById("tooltip");
+        if (!node) { tip.style.display = "none"; return; }
+        const inflow = node.net_inflow_usd;
+        const flowColor = inflow == null ? "#8b949e" : inflow >= 0 ? "#3fb950" : "#f85149";
+        tip.innerHTML = `
+          <div class="t-ticker" style="color:${node.color}">${node.id}</div>
+          <div>${SECTOR_NAMES[node.id] || node.id}</div>
+          <div>flow &nbsp;&nbsp;<span style="color:${flowColor}">${fmt_usd(inflow)}</span></div>
+          <div>AUM &nbsp;&nbsp;<span style="color:#8b949e">${fmt_aum(node.aum_usd)}</span></div>
+          <div>momentum <span style="color:#8b949e">${(node.momentum_rank * 100).toFixed(0)}th pct</span></div>
+        `;
+        tip.style.display = "block";
+      })
+      .onNodeClick(node => {
+        Graph.centerAt(node.x, node.y, 500);
+        Graph.zoom(2.5, 500);
+      });
+
+    // Move tooltip with mouse
+    document.getElementById("graph").addEventListener("mousemove", e => {
+      const tip = document.getElementById("tooltip");
+      if (tip.style.display === "none") return;
+      tip.style.left = (e.clientX + 16) + "px";
+      tip.style.top = (e.clientY - 20) + "px";
+    });
+
+    // --- State ---
+    let graphData = { nodes: [], links: [] };
+    let hasFlowData = false;
+
+    function applyFlowUpdate(data) {
+      const sectors = data.sectors || {};
+      const correlations = data.correlations || [];
+      const meta = data.meta || {};
+
+      hasFlowData = Object.values(sectors).some(s => s.net_inflow_usd != null);
+
+      // --- Node sizing ---
+      // When flow data exists: size by log(abs(net_inflow_usd)) — dramatic visual difference
+      // When no flow data: size by AUM
+      let sizeKey, sizeVals;
+      if (hasFlowData) {
+        // log scale so billion-dollar flows don't dwarf million-dollar ones entirely
+        sizeVals = Object.entries(sectors).map(([t, s]) => [
+          t, Math.log10(Math.abs(s.net_inflow_usd || 1) + 1)
+        ]);
+      } else {
+        sizeVals = Object.entries(sectors).map(([t, s]) => [
+          t, s.aum_usd || 0
+        ]);
+      }
+      const rawSizes = sizeVals.map(([, v]) => v);
+      const sizeMin = Math.min(...rawSizes);
+      const sizeMax = Math.max(...rawSizes);
+      const sizeRange = sizeMax - sizeMin || 1;
+      const sizeMap = Object.fromEntries(
+        sizeVals.map(([t, v]) => [t, MIN_R + (v - sizeMin) / sizeRange * (MAX_R - MIN_R)])
+      );
+
+      // --- Max abs inflow for link normalisation ---
+      const flowVals = Object.values(sectors).map(s => Math.abs(s.net_inflow_usd || 0));
+      const maxAbsFlow = Math.max(...flowVals, 1);
+
+      // --- Nodes ---
+      const nodes = Object.entries(sectors).map(([ticker, s]) => {
+        const pos = fixedPos[ticker] || {};
+        const isMacro = MACRO_TICKERS.has(ticker);
+        const minR = isMacro ? MACRO_MIN_R : MIN_R;
+        const maxR = isMacro ? MACRO_MAX_R : MAX_R;
+        const baseR = (minR + maxR) / 2;
+        const rawSize = sizeMap[ticker];
+        // Re-scale within each tier's own range
+        const r = rawSize != null ? minR + (rawSize - MIN_R) / (MAX_R - MIN_R) * (maxR - minR) : baseR;
+        return {
+          id: ticker,
+          color: SECTOR_COLORS[ticker] || "#e6edf3",
+          radius: Math.max(minR, Math.min(maxR, r)),
+          isMacro,
+          net_inflow_usd: s.net_inflow_usd ?? null,
+          aum_usd: s.aum_usd ?? null,
+          momentum_rank: s.momentum_rank ?? 0.5,
+          fx: pos.fx, fy: pos.fy,
+          x: pos.fx,  y: pos.fy,
+        };
+      });
+
+      const nodeMap = {};
+      nodes.forEach(n => { nodeMap[n.id] = n; });
+
+      // --- Correlation |corr| range for fallback normalisation ---
+      const corrAbsVals = correlations.map(c => Math.abs(c.correlation));
+      const maxCorr = Math.max(...corrAbsVals, 0.01);
+
+      // --- Links — tiered threshold by edge type ---
+      // Sector↔Sector: strict (high cohesion market = lots of lines, keep only strongest)
+      // Macro↔Sector:  permissive (cross-asset signal is new information, show it)
+      // Macro↔Macro:   show all (only 6 possible pairs, all informative)
+      const THRESH_SECTOR = 0.75;
+      const THRESH_CROSS  = 0.25;
+      const THRESH_MACRO  = 0.00;
+
+      const links = correlations.filter(c => {
+        const aMacro = MACRO_TICKERS.has(c.ticker_a);
+        const bMacro = MACRO_TICKERS.has(c.ticker_b);
+        const abs = Math.abs(c.correlation);
+        if (aMacro && bMacro) return abs >= THRESH_MACRO;
+        if (aMacro || bMacro) return abs >= THRESH_CROSS;
+        return abs >= THRESH_SECTOR;
+      }).map(c => {
+        const na = nodeMap[c.ticker_a];
+        const nb = nodeMap[c.ticker_b];
+        let flow_magnitude = null;
+        let flow_norm = null;
+
+        if (na && nb && na.net_inflow_usd != null && nb.net_inflow_usd != null) {
+          const raw = (na.net_inflow_usd - nb.net_inflow_usd) / maxAbsFlow;
+          flow_magnitude = raw * Math.abs(c.correlation);
+          // Normalise to [0,1] for particle scaling — use log of the absolute dollar diff
+          const absDiff = Math.abs(na.net_inflow_usd - nb.net_inflow_usd);
+          flow_norm = Math.min(1, Math.log10(absDiff + 1) / Math.log10(maxAbsFlow + 1));
+        }
+
+        // Fallback: use |correlation| normalised to [0,1]
+        const corr_norm = Math.abs(c.correlation) / maxCorr;
+
+        return {
+          source: c.ticker_a,
+          target: c.ticker_b,
+          correlation: c.correlation,
+          flow_magnitude,
+          flow_norm,   // drives particles when flow data is present
+          corr_norm,   // fallback when flow data is absent
+        };
+      });
+
+      graphData = { nodes, links };
+      Graph.graphData(graphData);
+
+      // Update ambient state
+      cohesionLevel = meta.avg_cohesion ?? 0;
+
+      // Update HUD
+      document.getElementById("hud-cohesion").textContent = meta.avg_cohesion != null
+        ? meta.avg_cohesion.toFixed(3) : "—";
+
+      // Dominant: sector with highest abs net_inflow_usd
+      if (hasFlowData) {
+        const dom = nodes.reduce((a, b) =>
+          Math.abs(b.net_inflow_usd || 0) > Math.abs(a.net_inflow_usd || 0) ? b : a
+        );
+        dominantTicker = dom.id;
+        document.getElementById("hud-dominant").textContent = dom.id;
+      } else {
+        document.getElementById("hud-dominant").textContent = "—";
+      }
+
+      const flowEl = document.getElementById("hud-flows");
+      if (hasFlowData) {
+        flowEl.className = "value";
+        flowEl.textContent = "live SSGA";
+      } else {
+        flowEl.className = "no-data";
+        flowEl.textContent = "pending ingest";
+      }
+
+      document.getElementById("hud-ts").textContent =
+        new Date().toLocaleTimeString();
+    }
+
+    // --- WebSocket ---
+    function connect() {
+      const ws = new WebSocket(`ws://${location.host}/ws/live`);
+      ws.onmessage = evt => {
+        const msg = JSON.parse(evt.data);
+        if (msg.type === "flow_update") applyFlowUpdate(msg.data);
+      };
+      ws.onclose = () => setTimeout(connect, 5000);
+    }
+
+    // --- Initial load via REST (no waiting 60s for first WS broadcast) ---
+    fetch("/analysis/flows")
+      .then(r => r.json())
+      .then(data => {
+        const sectors = {};
+        data.flows.forEach(f => {
+          sectors[f.ticker] = {
+            net_inflow_usd: f.net_inflow_usd,
+            aum_usd: f.aum_usd,
+            momentum_rank: f.momentum_rank,
+          };
+        });
+        applyFlowUpdate({
+          sectors,
+          correlations: data.correlations,
+          meta: { avg_cohesion: null },
+        });
+      })
+      .catch(err => console.warn("Initial load failed:", err));
+
+    connect();
+  </script>
+</body>
+</html>

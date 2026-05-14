@@ -8,12 +8,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from sector_flow.api.deps import get_db
-from sector_flow.api.schemas import CorrelationPair, MarketRegimeResponse
+from sector_flow.api.schemas import CorrelationPair, FlowAnalysisResponse, MarketRegimeResponse, SectorFlowEntry
 from sector_flow.database.models import SECTOR_ETFS
 from sector_flow.database.repository import (
     CovarianceRepository,
     ETFRepository,
     FlowMetricRepository,
+    PriceRepository,
 )
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
@@ -85,6 +86,106 @@ def _get_regime_snapshot(db: Session) -> dict:
         "sector_momentum": sector_momentum,
         "computed_at": datetime.utcnow().isoformat(),
     }
+
+
+@router.get("/flows", response_model=FlowAnalysisResponse)
+def get_flows(db: Session = Depends(get_db)) -> FlowAnalysisResponse:
+    """
+    Primary objective data endpoint.
+
+    Returns per-sector capital flows, AUM, and momentum rank (cross-sectional),
+    plus significant correlation pairs. No regime interpretation.
+
+    momentum_rank is min-max normalized across all 11 sectors: the sector with
+    the highest raw momentum gets 1.0, lowest gets 0.0. If all momentum values
+    are equal or missing, all sectors return 0.5.
+    """
+    etf_repo = ETFRepository(db)
+    flow_repo = FlowMetricRepository(db)
+    price_repo = PriceRepository(db)
+    cov_repo = CovarianceRepository(db)
+
+    etfs = etf_repo.get_all()
+    etf_map = {etf.ticker: etf for etf in etfs}
+    id_to_ticker = {etf.id: etf.ticker for etf in etfs}
+
+    # Collect raw momentum values for cross-sectional normalization
+    raw_momentum: dict[str, float] = {}
+    raw_flow: dict[str, float | None] = {}
+    raw_aum: dict[str, float | None] = {}
+
+    for ticker in TICKERS:
+        etf = etf_map.get(ticker)
+        if etf is None:
+            continue
+
+        # momentum lives in FlowMetric (stored by analysis engine)
+        mom = flow_repo.get_latest(etf.id, "momentum")
+        raw_momentum[ticker] = mom if mom is not None else 0.0
+
+        # net_inflow_usd and aum_usd live in PriceData (from SSGA collector)
+        rows = price_repo.get_price_data(etf.id)
+        if rows:
+            latest = rows[-1]
+            raw_flow[ticker] = latest.net_inflow_usd
+            raw_aum[ticker] = latest.aum_usd
+        else:
+            raw_flow[ticker] = None
+            raw_aum[ticker] = None
+
+    # Min-max normalize momentum across all 11 sectors to [0.0, 1.0]
+    mom_values = list(raw_momentum.values())
+    mom_min = min(mom_values) if mom_values else 0.0
+    mom_max = max(mom_values) if mom_values else 0.0
+    mom_range = mom_max - mom_min
+
+    def _momentum_rank(ticker: str) -> float:
+        if mom_range == 0.0:
+            return 0.5
+        return (raw_momentum.get(ticker, 0.0) - mom_min) / mom_range
+
+    flows = [
+        SectorFlowEntry(
+            ticker=ticker,
+            net_inflow_usd=raw_flow.get(ticker),
+            aum_usd=raw_aum.get(ticker),
+            momentum_rank=round(_momentum_rank(ticker), 4),
+        )
+        for ticker in TICKERS
+        if ticker in etf_map
+    ]
+
+    # Significant correlation pairs (reuse same query as /analysis/correlations)
+    latest_pairs = cov_repo.get_latest_matrix(window=30)
+    correlations = []
+    for p in latest_pairs:
+        ta = id_to_ticker.get(p.etf_a_id, "")
+        tb = id_to_ticker.get(p.etf_b_id, "")
+        if not ta or not tb:
+            continue
+        if ta > tb:
+            ta, tb = tb, ta
+        corr = p.correlation or 0.0
+        if abs(corr) < 0.3:
+            continue
+        correlations.append(
+            CorrelationPair(
+                ticker_a=ta,
+                ticker_b=tb,
+                correlation=corr,
+                covariance=p.covariance or 0.0,
+                p_value=None,
+                window_days=p.window_days,
+                significant=True,
+            )
+        )
+    correlations.sort(key=lambda r: (r.ticker_a, r.ticker_b))
+
+    return FlowAnalysisResponse(
+        flows=flows,
+        correlations=correlations,
+        computed_at=datetime.utcnow().isoformat(),
+    )
 
 
 @router.get("/regime", response_model=MarketRegimeResponse)

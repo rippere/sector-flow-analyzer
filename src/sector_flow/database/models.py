@@ -8,18 +8,30 @@ from sqlalchemy.orm import declarative_base, relationship
 Base = declarative_base()
 
 SECTOR_ETFS = [
-    ("XLK", "Technology", "GICS-45"),
-    ("XLF", "Financials", "GICS-40"),
-    ("XLE", "Energy", "GICS-10"),
-    ("XLV", "Healthcare", "GICS-35"),
-    ("XLY", "Consumer Discretionary", "GICS-25"),
-    ("XLP", "Consumer Staples", "GICS-30"),
-    ("XLI", "Industrials", "GICS-20"),
-    ("XLB", "Materials", "GICS-15"),
-    ("XLRE", "Real Estate", "GICS-60"),
-    ("XLU", "Utilities", "GICS-55"),
-    ("XLC", "Communication Services", "GICS-50"),
+    # US Equity Sectors (SPDR)
+    ("XLK",  "Technology",              "GICS-45"),
+    ("XLF",  "Financials",              "GICS-40"),
+    ("XLE",  "Energy",                  "GICS-10"),
+    ("XLV",  "Healthcare",              "GICS-35"),
+    ("XLY",  "Consumer Discretionary",  "GICS-25"),
+    ("XLP",  "Consumer Staples",        "GICS-30"),
+    ("XLI",  "Industrials",             "GICS-20"),
+    ("XLB",  "Materials",               "GICS-15"),
+    ("XLRE", "Real Estate",             "GICS-60"),
+    ("XLU",  "Utilities",               "GICS-55"),
+    ("XLC",  "Communication Services",  "GICS-50"),
+    # Macro context — cross-asset rotation signals
+    ("SPY",  "S&P 500",                 "MACRO-EQ"),   # US equity baseline (SSGA)
+    ("GLD",  "Gold",                    "MACRO-CM"),   # Safe haven / inflation (SSGA)
+    ("TLT",  "20yr Treasuries",         "MACRO-FI"),   # Rate / risk-off signal (iShares — no SSGA flow)
+    ("SPEM", "Emerging Markets",        "MACRO-EM"),   # Global risk appetite (SSGA)
 ]
+
+# Tickers whose fund flow data is available from SSGA Excel
+SSGA_FLOW_TICKERS = {t for t, _, c in SECTOR_ETFS if c != "MACRO-FI"}
+
+# Macro-context tickers (visually distinguished in the dashboard)
+MACRO_TICKERS = {t for t, _, c in SECTOR_ETFS if c.startswith("MACRO")}
 
 
 class SectorETF(Base):

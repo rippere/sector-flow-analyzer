@@ -19,82 +19,93 @@ _connected: Set[WebSocket] = set()
 _start_time: float = time.monotonic()
 
 
-def _build_regime_message() -> dict:
-    """Read latest regime from DB and build a regime_update message dict."""
+def _build_flow_message() -> dict:
+    """Read latest objective flow data from DB and build a flow_update message dict."""
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     from sector_flow.config import settings
     from sector_flow.database.models import SECTOR_ETFS
-    from sector_flow.database.repository import ETFRepository, FlowMetricRepository, CovarianceRepository
+    from sector_flow.database.repository import ETFRepository, FlowMetricRepository, PriceRepository, CovarianceRepository
 
-    _REGIME_INV = {
-        1.0: "accumulation",
-        2.0: "breakout",
-        0.0: "neutral",
-        -1.0: "distribution",
-        -2.0: "breakdown",
-    }
     TICKERS = [t for t, _, _ in SECTOR_ETFS]
 
     engine = create_engine(settings.database_url, connect_args={"check_same_thread": False})
-    Session = sessionmaker(bind=engine)
-    session = Session()
+    SessionLocal = sessionmaker(bind=engine)
+    session = SessionLocal()
     try:
         etf_repo = ETFRepository(session)
         flow_repo = FlowMetricRepository(session)
+        price_repo = PriceRepository(session)
         cov_repo = CovarianceRepository(session)
 
         etfs = etf_repo.get_all()
         etf_map = {etf.ticker: etf for etf in etfs}
+        id_to_ticker = {etf.id: etf.ticker for etf in etfs}
 
-        sector_regimes: dict[str, str] = {}
-        sector_momentum: dict[str, float] = {}
-        cohesion_vals = []
+        raw_momentum: dict[str, float] = {}
+        raw_flow: dict[str, float | None] = {}
+        raw_aum: dict[str, float | None] = {}
 
         for ticker in TICKERS:
             etf = etf_map.get(ticker)
             if etf is None:
                 continue
-            regime_val = flow_repo.get_latest(etf.id, "regime_label")
-            momentum = flow_repo.get_latest(etf.id, "momentum")
-            cohesion = flow_repo.get_latest(etf.id, "cohesion")
+            mom = flow_repo.get_latest(etf.id, "momentum")
+            raw_momentum[ticker] = mom if mom is not None else 0.0
+            rows = price_repo.get_price_data(etf.id)
+            if rows:
+                latest = rows[-1]
+                raw_flow[ticker] = latest.net_inflow_usd
+                raw_aum[ticker] = latest.aum_usd
+            else:
+                raw_flow[ticker] = None
+                raw_aum[ticker] = None
 
-            sector_regimes[ticker] = (
-                _REGIME_INV.get(regime_val, "neutral") if regime_val is not None else "neutral"
-            )
-            sector_momentum[ticker] = momentum if momentum is not None else 0.0
-            if cohesion is not None:
-                cohesion_vals.append(cohesion)
+        # Cross-sectional min-max momentum rank [0.0, 1.0]
+        mom_values = list(raw_momentum.values())
+        mom_min = min(mom_values) if mom_values else 0.0
+        mom_max = max(mom_values) if mom_values else 0.0
+        mom_range = mom_max - mom_min
 
-        avg_cohesion = sum(cohesion_vals) / len(cohesion_vals) if cohesion_vals else 0.0
+        def _rank(ticker: str) -> float:
+            if mom_range == 0.0:
+                return 0.5
+            return round((raw_momentum.get(ticker, 0.0) - mom_min) / mom_range, 4)
+
+        sectors = {
+            ticker: {
+                "net_inflow_usd": raw_flow.get(ticker),
+                "aum_usd": raw_aum.get(ticker),
+                "momentum_rank": _rank(ticker),
+            }
+            for ticker in TICKERS
+            if ticker in etf_map
+        }
 
         latest_pairs = cov_repo.get_latest_matrix(window=30)
-        total_pairs = len(latest_pairs)
-        sig_pairs = sum(
-            1 for p in latest_pairs if p.correlation is not None and abs(p.correlation) >= 0.3
-        )
+        correlations = []
+        corr_vals = []
+        for p in latest_pairs:
+            ta = id_to_ticker.get(p.etf_a_id, "")
+            tb = id_to_ticker.get(p.etf_b_id, "")
+            if not ta or not tb:
+                continue
+            if ta > tb:
+                ta, tb = tb, ta
+            corr = p.correlation or 0.0
+            corr_vals.append(abs(corr))
+            if abs(corr) >= 0.3:
+                correlations.append({"ticker_a": ta, "ticker_b": tb, "correlation": corr})
 
-        bullish = sum(1 for m in sector_momentum.values() if m > 0)
-        bearish = sum(1 for m in sector_momentum.values() if m < 0)
-        if avg_cohesion > 0.6:
-            market_regime = "trending"
-        elif bullish > bearish:
-            market_regime = "rotation"
-        elif bearish > bullish:
-            market_regime = "risk_off"
-        else:
-            market_regime = "neutral"
+        avg_cohesion = round(sum(corr_vals) / len(corr_vals), 4) if corr_vals else 0.0
 
         return {
-            "type": "regime_update",
+            "type": "flow_update",
             "timestamp": datetime.utcnow().isoformat(),
             "data": {
-                "market_regime": market_regime,
-                "cohesion": avg_cohesion,
-                "significant_pairs": sig_pairs,
-                "total_pairs": total_pairs,
-                "sector_regimes": sector_regimes,
-                "sector_momentum": sector_momentum,
+                "sectors": sectors,
+                "correlations": correlations,
+                "meta": {"avg_cohesion": avg_cohesion},
             },
         }
     finally:
@@ -109,7 +120,7 @@ async def _broadcast_loop() -> None:
         if not _connected:
             continue
         try:
-            msg = await asyncio.get_event_loop().run_in_executor(None, _build_regime_message)
+            msg = await asyncio.get_event_loop().run_in_executor(None, _build_flow_message)
             dead = set()
             for ws in list(_connected):
                 try:
@@ -177,7 +188,7 @@ async def websocket_live(websocket: WebSocket) -> None:
     try:
         # Immediate snapshot
         try:
-            snap = await asyncio.get_event_loop().run_in_executor(None, _build_regime_message)
+            snap = await asyncio.get_event_loop().run_in_executor(None, _build_flow_message)
             await websocket.send_json(snap)
         except Exception as exc:
             logger.error(f"[ws] initial snapshot error: {exc}")

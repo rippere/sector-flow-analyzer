@@ -15,8 +15,13 @@ import plotly.graph_objects as go
 import pytest
 from dash import Dash, html
 
+from unittest.mock import MagicMock
+
+import requests as req_mod
+
 from sector_flow.visualizations.dashboard import (
     REGIME_COLORS,
+    _get,
     _regime_color,
     build_data_health_panel,
     build_flow_table,
@@ -24,6 +29,10 @@ from sector_flow.visualizations.dashboard import (
     build_network_graph,
     build_price_chart,
     create_app,
+    fetch_correlations,
+    fetch_prices,
+    fetch_regime,
+    fetch_sectors,
 )
 
 
@@ -322,6 +331,68 @@ class TestCreateApp:
     def test_layout_has_data_health_panel(self):
         app = create_app()
         assert _find_by_id(app.layout, "data-health-panel") is not None
+
+
+# ---------------------------------------------------------------------------
+# _get and fetch helpers
+# ---------------------------------------------------------------------------
+
+class TestGetHelper:
+    def test_returns_json_on_success(self):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {"ok": True}
+        with patch("sector_flow.visualizations.dashboard.requests.get", return_value=mock_resp):
+            result = _get("http://fake/test")
+        assert result == {"ok": True}
+
+    def test_returns_none_on_request_exception(self):
+        with patch("sector_flow.visualizations.dashboard.requests.get",
+                   side_effect=req_mod.RequestException("timeout")):
+            result = _get("http://fake/test")
+        assert result is None
+
+    def test_fetch_sectors_returns_list(self):
+        with patch("sector_flow.visualizations.dashboard._get", return_value=[{"ticker": "XLK"}]):
+            result = fetch_sectors("http://fake")
+        assert result == [{"ticker": "XLK"}]
+
+    def test_fetch_sectors_returns_empty_on_none(self):
+        with patch("sector_flow.visualizations.dashboard._get", return_value=None):
+            result = fetch_sectors("http://fake")
+        assert result == []
+
+    def test_fetch_regime_returns_dict(self):
+        with patch("sector_flow.visualizations.dashboard._get", return_value={"market_regime": "rotation"}):
+            result = fetch_regime("http://fake")
+        assert result == {"market_regime": "rotation"}
+
+    def test_fetch_regime_returns_none_on_failure(self):
+        with patch("sector_flow.visualizations.dashboard._get", return_value=None):
+            result = fetch_regime("http://fake")
+        assert result is None
+
+    def test_fetch_correlations_returns_list(self):
+        corrs = [{"ticker_a": "XLK", "ticker_b": "XLF"}]
+        with patch("sector_flow.visualizations.dashboard._get", return_value=corrs):
+            result = fetch_correlations("http://fake")
+        assert result == corrs
+
+    def test_fetch_correlations_returns_empty_on_none(self):
+        with patch("sector_flow.visualizations.dashboard._get", return_value=None):
+            result = fetch_correlations("http://fake")
+        assert result == []
+
+    def test_fetch_prices_returns_list(self):
+        prices = [{"date": "2025-01-10", "close": 200.0}]
+        with patch("sector_flow.visualizations.dashboard._get", return_value=prices):
+            result = fetch_prices("http://fake", "XLK")
+        assert result == prices
+
+    def test_fetch_prices_returns_empty_on_none(self):
+        with patch("sector_flow.visualizations.dashboard._get", return_value=None):
+            result = fetch_prices("http://fake", "XLK")
+        assert result == []
 
 
 # ---------------------------------------------------------------------------

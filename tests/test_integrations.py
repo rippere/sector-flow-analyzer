@@ -165,6 +165,93 @@ def test_osc_bridge_sends_expected_addresses():
     assert "/sector/pair/XLK/XLF/correlation" in sent_addresses
 
 
+def test_osc_bridge_all_zero_flows_normalizer_guards():
+    """When all net_inflow_usd are 0, max_abs_flow guard sets it to 1.0 (no div-by-zero)."""
+    from sector_flow.integrations.osc_bridge import OSCBridge
+
+    zero_flows_response = {
+        "flows": [
+            {"ticker": t, "net_inflow_usd": 0.0, "aum_usd": 1e10, "momentum_rank": 0.5}
+            for t, _, _ in SECTOR_ETFS
+        ],
+        "correlations": [],
+        "computed_at": "2026-05-15T10:00:00",
+    }
+
+    def fake_get(url, timeout=5):
+        return _make_mock_response(zero_flows_response)
+
+    with patch("sector_flow.integrations.osc_bridge.requests.get", side_effect=fake_get):
+        with patch("sector_flow.integrations.osc_bridge.udp_client.SimpleUDPClient"):
+            bridge = OSCBridge()
+            count = bridge.broadcast_snapshot()
+
+    assert count > 0
+
+
+def test_osc_bridge_run_forever_sends_heartbeat():
+    """run_forever sends heartbeat OSC messages each iteration."""
+    from sector_flow.integrations.osc_bridge import OSCBridge
+
+    def fake_get(url, timeout=5):
+        return _make_mock_response(_FAKE_FLOWS_RESPONSE)
+
+    sent: list[str] = []
+
+    with patch("sector_flow.integrations.osc_bridge.requests.get", side_effect=fake_get):
+        with patch("sector_flow.integrations.osc_bridge.udp_client.SimpleUDPClient"):
+            with patch("sector_flow.integrations.osc_bridge.time.sleep", side_effect=SystemExit):
+                bridge = OSCBridge()
+                bridge._send = lambda addr, *args: sent.append(addr)
+                with pytest.raises(SystemExit):
+                    bridge.run_forever(interval_seconds=1)
+
+    assert "/control/heartbeat" in sent
+    assert "/control/data_staleness_seconds" in sent
+    assert "/control/mode" in sent
+
+
+def test_osc_bridge_run_forever_handles_broadcast_exception():
+    """run_forever continues without crashing when broadcast_snapshot raises."""
+    from sector_flow.integrations.osc_bridge import OSCBridge
+
+    call_count = [0]
+
+    def fail_once(*args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise RuntimeError("transient broadcast error")
+        raise SystemExit  # stop loop on second call
+
+    with patch("sector_flow.integrations.osc_bridge.udp_client.SimpleUDPClient"):
+        with patch("sector_flow.integrations.osc_bridge.time.sleep", side_effect=fail_once):
+            bridge = OSCBridge()
+            bridge.broadcast_snapshot = MagicMock(side_effect=RuntimeError("boom"))
+            with patch("sector_flow.integrations.osc_bridge.time.sleep", side_effect=SystemExit):
+                with pytest.raises(SystemExit):
+                    bridge.run_forever(interval_seconds=1)
+
+    # broadcast_snapshot was called; exception was swallowed
+    assert bridge.broadcast_snapshot.called
+
+
+def test_osc_bridge_run_forever_handles_heartbeat_exception():
+    """run_forever continues when heartbeat _send raises."""
+    from sector_flow.integrations.osc_bridge import OSCBridge
+
+    def fake_get(url, timeout=5):
+        return _make_mock_response(_FAKE_FLOWS_RESPONSE)
+
+    with patch("sector_flow.integrations.osc_bridge.requests.get", side_effect=fake_get):
+        with patch("sector_flow.integrations.osc_bridge.udp_client.SimpleUDPClient"):
+            with patch("sector_flow.integrations.osc_bridge.time.sleep", side_effect=SystemExit):
+                bridge = OSCBridge()
+                bridge._send = MagicMock(side_effect=RuntimeError("udp error"))
+                with pytest.raises(SystemExit):
+                    bridge.run_forever(interval_seconds=1)
+    # No crash — heartbeat exception swallowed, loop ran
+
+
 # ---------------------------------------------------------------------------
 # Deliverable 2 (removed): Prometheus /metrics endpoint
 # The /metrics endpoint was removed in Step 6 — unscraped, single-user

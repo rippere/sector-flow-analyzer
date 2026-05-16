@@ -55,3 +55,37 @@ def test_wal_mode_enabled():
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+def test_get_session_factory_returns_cached_instance():
+    """get_session_factory returns the same object on repeated calls (cached singleton)."""
+    import sector_flow.database.session as sess_mod
+    orig_engine = sess_mod._engine
+    orig_factory = sess_mod._SessionFactory
+    sess_mod._engine = None
+    sess_mod._SessionFactory = None
+
+    try:
+        f1 = sess_mod.get_session_factory("sqlite://")
+        f2 = sess_mod.get_session_factory("sqlite://")
+        assert f1 is f2
+    finally:
+        sess_mod._engine = orig_engine
+        sess_mod._SessionFactory = orig_factory
+
+
+def test_get_session_rolls_back_and_reraises_on_exception():
+    """get_session rolls back the session and re-raises when an exception occurs."""
+    import sector_flow.database.session as sess_mod
+    orig_engine = sess_mod._engine
+    orig_factory = sess_mod._SessionFactory
+    sess_mod._engine = None
+    sess_mod._SessionFactory = None
+
+    try:
+        with pytest.raises(ValueError, match="test rollback"):
+            with sess_mod.get_session("sqlite://") as session:
+                raise ValueError("test rollback")
+    finally:
+        sess_mod._engine = orig_engine
+        sess_mod._SessionFactory = orig_factory

@@ -335,6 +335,16 @@ class TestSSGACollector:
             with pytest.raises(CollectorError, match="missing required columns"):
                 self.collector._download_snapshot()
 
+    def test_download_snapshot_raises_on_corrupt_excel_bytes(self):
+        """When resp.content is not valid Excel, CollectorError is raised."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.content = b"this is not excel content at all"
+
+        with patch("sector_flow.collectors.ssga_collector.requests.get", return_value=mock_resp):
+            with pytest.raises(CollectorError, match="SSGA Excel parse failed"):
+                self.collector._download_snapshot()
+
     def test_download_snapshot_success(self):
         df = _make_ssga_dataframe()
         mock_resp = MagicMock()

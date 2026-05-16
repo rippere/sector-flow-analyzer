@@ -21,8 +21,10 @@ import requests as req_mod
 
 from sector_flow.visualizations.dashboard import (
     REGIME_COLORS,
+    _badge,
     _get,
     _regime_color,
+    _stat,
     build_data_health_panel,
     build_flow_table,
     build_momentum_chart,
@@ -118,6 +120,21 @@ class TestBuildNetworkGraph:
         tickers = set(node_trace.customdata)
         assert "XLK" in tickers
         assert "XLF" in tickers
+
+    def test_negative_significant_correlation_uses_red_edge(self):
+        neg_sig = [{"ticker_a": "XLK", "ticker_b": "XLF", "correlation": -0.7, "p_value": 0.01, "significant": True}]
+        fig_neg = build_network_graph(_SECTORS, neg_sig)
+        fig_pos = build_network_graph(_SECTORS, _CORRELATIONS)
+        # Red edge trace should exist for negative correlation
+        assert len(fig_neg.data) > len(build_network_graph(_SECTORS, []).data)
+
+    def test_correlation_with_missing_ticker_skipped(self):
+        unknown_pair = [{"ticker_a": "UNKNOWN", "ticker_b": "XLF", "correlation": 0.9, "p_value": 0.001, "significant": True}]
+        # Should not crash — the unknown ticker is skipped
+        fig_base = build_network_graph(_SECTORS, [])
+        fig_unknown = build_network_graph(_SECTORS, unknown_pair)
+        # No edge added for unknown ticker
+        assert len(fig_unknown.data) == len(fig_base.data)
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +312,17 @@ class TestBuildDataHealthPanel:
         result = build_data_health_panel(sectors)
         assert "#D50000" in str(result)
 
+    def test_slightly_stale_date_yields_yellow_indicator(self):
+        slightly_stale = date.today() - timedelta(days=4)
+        sectors = [{"ticker": "XLK", "row_count": 10, "latest_date": slightly_stale.isoformat(), "regime": None, "momentum": None}]
+        result = build_data_health_panel(sectors)
+        assert "#FFD600" in str(result)
+
+    def test_invalid_date_string_handled_without_crash(self):
+        sectors = [{"ticker": "XLK", "row_count": 10, "latest_date": "not-a-date", "regime": None, "momentum": None}]
+        result = build_data_health_panel(sectors)
+        assert isinstance(result, html.Div)
+
 
 # ---------------------------------------------------------------------------
 # create_app
@@ -336,6 +364,26 @@ class TestCreateApp:
 # ---------------------------------------------------------------------------
 # _get and fetch helpers
 # ---------------------------------------------------------------------------
+
+class TestLayoutHelpers:
+    def test_badge_returns_span_with_text(self):
+        result = _badge("ROTATION", "#FF0000")
+        assert isinstance(result, html.Span)
+        assert result.children == "ROTATION"
+
+    def test_badge_applies_color_in_style(self):
+        result = _badge("TEST", "#123456")
+        assert result.style["backgroundColor"] == "#123456"
+
+    def test_stat_returns_span(self):
+        result = _stat("Cohesion", "0.560")
+        assert isinstance(result, html.Span)
+
+    def test_stat_label_in_children(self):
+        result = _stat("Pairs", "5/10")
+        text = str(result)
+        assert "Pairs" in text and "5/10" in text
+
 
 class TestGetHelper:
     def test_returns_json_on_success(self):

@@ -423,3 +423,52 @@ def test_app_lifespan_startup_and_shutdown():
     mock_init_db.assert_called_once()
     mock_start.assert_called_once()
     mock_stop.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Pipeline ingest endpoint
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_post_pipeline_ingest_mocked(seeded_engine):
+    """POST /pipeline/ingest with run_daily mocked — covers ingest_pipeline body."""
+    from sector_flow.api.app import app
+    from sector_flow.api.deps import get_db
+
+    orig_engine, orig_factory = _patch_session_globals(seeded_engine)
+    app.dependency_overrides[get_db] = _make_override(seeded_engine)
+
+    fake_result = {"yfinance_rows": 11, "ssga_rows": 0, "flow_rows_updated": 11, "errors": []}
+
+    try:
+        with patch("sector_flow.pipeline.run_daily", return_value=fake_result):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+                resp = await ac.post("/pipeline/ingest")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["detail"]["yfinance_rows"] == 11
+    finally:
+        app.dependency_overrides.clear()
+        _restore_session_globals(orig_engine, orig_factory)
+
+
+# ---------------------------------------------------------------------------
+# get_db dependency
+# ---------------------------------------------------------------------------
+
+def test_get_db_yields_session():
+    """get_db() body is covered when get_session is not mocked out."""
+    from unittest.mock import MagicMock, patch
+    from sector_flow.api.deps import get_db
+
+    mock_session = MagicMock()
+    mock_cm = MagicMock()
+    mock_cm.__enter__ = MagicMock(return_value=mock_session)
+    mock_cm.__exit__ = MagicMock(return_value=None)
+
+    with patch("sector_flow.api.deps.get_session", return_value=mock_cm):
+        gen = get_db()
+        session = next(gen)
+
+    assert session is mock_session

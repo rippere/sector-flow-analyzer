@@ -214,6 +214,22 @@ async def test_get_flows_xlk(app_with_db):
     assert isinstance(resp.json(), list)
 
 
+@pytest.mark.asyncio
+async def test_get_prices_unknown_ticker_404(app_with_db):
+    app, _ = app_with_db
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        resp = await ac.get("/sectors/BOGUS/prices")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_flows_unknown_ticker_404(app_with_db):
+    app, _ = app_with_db
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        resp = await ac.get("/sectors/BOGUS/flows")
+    assert resp.status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # Analysis tests
 # ---------------------------------------------------------------------------

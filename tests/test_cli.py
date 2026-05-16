@@ -630,3 +630,32 @@ def test_flow_import_dry_run_no_writes(runner, tmp_path):
         from sector_flow.database.models import FlowMetric
         count = s.query(FlowMetric).count()
     assert count == 0
+
+
+def test_flow_import_csv_read_error_shows_message(runner, tmp_path):
+    """Lines 369-370: pd.read_csv raising → ClickException with 'Cannot read CSV'.
+
+    Click validates the path exists before calling the command, so we need a real
+    file — then patch pandas.read_csv to simulate a read failure.
+    """
+    csv_file = tmp_path / "data.csv"
+    csv_file.write_bytes(b"\x00\x01binary")  # file exists; pd.read_csv will be mocked
+
+    with patch("pandas.read_csv", side_effect=Exception("Encoding error")):
+        result = runner.invoke(main, ["flow-import", str(csv_file)])
+
+    assert result.exit_code != 0
+    assert "Cannot read CSV" in result.output
+
+
+def test_flow_import_invalid_date_column_errors(runner, tmp_path):
+    """Lines 382-383: unparseable date column → ClickException with 'Cannot parse date'."""
+    csv_file = tmp_path / "bad_dates.csv"
+    csv_file.write_text(
+        "ticker,date,metric_name,value\n"
+        "XLK,not-a-date,put_call_ratio,0.5\n"
+    )
+    result = runner.invoke(main, ["flow-import", str(csv_file)])
+
+    assert result.exit_code != 0
+    assert "Cannot parse date column" in result.output

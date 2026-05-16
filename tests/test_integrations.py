@@ -81,6 +81,15 @@ _FAKE_SECTORS = [
     for t, n, _ in SECTOR_ETFS
 ]
 
+_FAKE_FLOWS_RESPONSE = {
+    "flows": [
+        {"ticker": t, "net_inflow_usd": 1_000_000.0 * i, "aum_usd": 50_000_000_000.0, "momentum_rank": 0.5}
+        for i, (t, _, _) in enumerate(SECTOR_ETFS)
+    ],
+    "correlations": _FAKE_CORRELATIONS,
+    "computed_at": "2026-05-15T10:00:00",
+}
+
 
 def _make_mock_response(data):
     """Build a minimal mock requests.Response-like object."""
@@ -91,16 +100,12 @@ def _make_mock_response(data):
 
 
 def test_osc_bridge_broadcast_builds_messages():
-    """OSCBridge.broadcast_snapshot() should call UDP client and return > 0 messages."""
+    """OSCBridge.broadcast_snapshot() should broadcast per-sector and meta OSC messages."""
     from sector_flow.integrations.osc_bridge import OSCBridge
 
     def fake_get(url, timeout=5):
-        if "/analysis/regime" in url:
-            return _make_mock_response(_FAKE_REGIME)
-        if "/analysis/correlations" in url:
-            return _make_mock_response(_FAKE_CORRELATIONS)
-        if "/sectors" in url and "/sectors/" not in url:
-            return _make_mock_response(_FAKE_SECTORS)
+        if "/analysis/flows" in url:
+            return _make_mock_response(_FAKE_FLOWS_RESPONSE)
         return _make_mock_response({})
 
     with patch("sector_flow.integrations.osc_bridge.requests.get", side_effect=fake_get):
@@ -111,9 +116,10 @@ def test_osc_bridge_broadcast_builds_messages():
             bridge = OSCBridge(api_url="http://localhost:8000", osc_host="127.0.0.1", osc_port=9000)
             count = bridge.broadcast_snapshot()
 
-    # Should send at least 1 message per sector (5 each) + meta messages
+    # v2.0: 3 messages per sector (flow_volume, momentum_rank, aum) + pair messages + 3 meta
+    expected_min = len(SECTOR_ETFS) * 3
     assert count > 0, f"Expected > 0 messages, got {count}"
-    assert count >= 11 * 5, f"Expected at least {11 * 5} sector messages, got {count}"
+    assert count >= expected_min, f"Expected at least {expected_min} messages, got {count}"
 
 
 def test_osc_bridge_returns_zero_on_api_failure():
@@ -130,22 +136,19 @@ def test_osc_bridge_returns_zero_on_api_failure():
 
 
 def test_osc_bridge_sends_expected_addresses():
-    """Verify that sector weight and meta regime addresses are sent."""
+    """Verify that v2.0 OSC addresses (flow_volume, momentum_rank, meta) are sent."""
     from sector_flow.integrations.osc_bridge import OSCBridge
 
     sent_addresses: list[str] = []
 
     def fake_get(url, timeout=5):
-        if "/analysis/regime" in url:
-            return _make_mock_response(_FAKE_REGIME)
-        if "/analysis/correlations" in url:
-            return _make_mock_response(_FAKE_CORRELATIONS)
-        return _make_mock_response(_FAKE_SECTORS)
+        if "/analysis/flows" in url:
+            return _make_mock_response(_FAKE_FLOWS_RESPONSE)
+        return _make_mock_response({})
 
     with patch("sector_flow.integrations.osc_bridge.requests.get", side_effect=fake_get):
         with patch("sector_flow.integrations.osc_bridge.udp_client.SimpleUDPClient"):
             bridge = OSCBridge()
-            # Intercept _send to capture addresses
             original_send = bridge._send
 
             def capturing_send(address, *args):
@@ -155,11 +158,10 @@ def test_osc_bridge_sends_expected_addresses():
             bridge._send = capturing_send
             bridge.broadcast_snapshot()
 
-    assert "/sector/XLK/weight" in sent_addresses
-    assert "/meta/regime" in sent_addresses
+    assert "/sector/XLK/flow_volume" in sent_addresses
+    assert "/sector/XLK/momentum_rank" in sent_addresses
     assert "/meta/cohesion" in sent_addresses
     assert "/meta/dominant_sector" in sent_addresses
-    # Pair messages
     assert "/sector/pair/XLK/XLF/correlation" in sent_addresses
 
 

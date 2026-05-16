@@ -155,12 +155,12 @@ def app_with_analysis(seeded_engine):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_get_sectors_returns_11(app_with_db):
+async def test_get_sectors_returns_all(app_with_db):
     app, _ = app_with_db
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         resp = await ac.get("/sectors")
     assert resp.status_code == 200
-    assert len(resp.json()) == 11
+    assert len(resp.json()) == len(SECTOR_ETFS)
 
 
 @pytest.mark.asyncio
@@ -252,9 +252,9 @@ async def test_get_matrix_shape(app_with_analysis):
         resp = await ac.get("/analysis/matrix")
     assert resp.status_code == 200
     matrix = resp.json()
-    assert len(matrix) == 11
+    assert len(matrix) == len(SECTOR_ETFS)
     for ticker, row in matrix.items():
-        assert len(row) == 11, f"Row for {ticker} should have 11 entries"
+        assert len(row) == len(SECTOR_ETFS), f"Row for {ticker} should have {len(SECTOR_ETFS)} entries"
         assert row[ticker] == 1.0, f"Diagonal entry for {ticker} should be 1.0"
 
 

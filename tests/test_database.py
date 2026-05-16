@@ -2,12 +2,12 @@ from sector_flow.database.models import SectorETF, PriceData, SECTOR_ETFS
 from sector_flow.database.repository import ETFRepository, PriceRepository
 
 
-def test_seed_etfs_creates_all_11(db_session):
+def test_seed_etfs_creates_all(db_session):
     repo = ETFRepository(db_session)
     created = repo.seed_etfs()
     db_session.commit()
-    assert len(created) == 11
-    assert db_session.query(SectorETF).count() == 11
+    assert len(created) == len(SECTOR_ETFS)
+    assert db_session.query(SectorETF).count() == len(SECTOR_ETFS)
 
 
 def test_seed_etfs_idempotent(db_session):
@@ -17,7 +17,7 @@ def test_seed_etfs_idempotent(db_session):
     created2 = repo.seed_etfs()
     db_session.commit()
     assert len(created2) == 0
-    assert db_session.query(SectorETF).count() == 11
+    assert db_session.query(SectorETF).count() == len(SECTOR_ETFS)
 
 
 def test_get_by_ticker(db_session):

@@ -237,6 +237,35 @@ class TestSignificance:
         assert "p_value" in result.columns
         assert "significant" in result.columns
 
+    def test_compute_p_values_sparse_pairs_skipped(self):
+        """Pairs with < 3 common data points are skipped (hits 'continue')."""
+        from sector_flow.analysis.significance import compute_p_values
+
+        # XLK has data only on days 0-1; XLF has data only on days 5-6 — no overlap
+        idx_a = pd.to_datetime(["2024-01-01", "2024-01-02"])
+        idx_b = pd.to_datetime(["2024-01-08", "2024-01-09"])
+        price_df = pd.DataFrame(
+            {"XLK": pd.Series([100.0, 101.0], index=idx_a),
+             "XLF": pd.Series([50.0, 51.0], index=idx_b)},
+        )
+        result = compute_p_values(price_df, window=30)
+        # No pair has ≥ 3 common dates → result is empty
+        assert result.empty
+
+    def test_compute_p_values_all_pairs_no_common_returns_empty_df(self):
+        """When every pair is skipped, function returns empty DataFrame with correct columns."""
+        from sector_flow.analysis.significance import compute_p_values
+
+        # Three tickers, each with data on completely different dates
+        df = pd.DataFrame({
+            "XLK": pd.Series([100.0], index=pd.to_datetime(["2024-01-01"])),
+            "XLF": pd.Series([50.0],  index=pd.to_datetime(["2024-02-01"])),
+            "XLE": pd.Series([60.0],  index=pd.to_datetime(["2024-03-01"])),
+        })
+        result = compute_p_values(df, window=30)
+        assert result.empty
+        assert list(result.columns) == ["ticker_a", "ticker_b", "correlation", "p_value"]
+
 
 # ---------------------------------------------------------------------------
 # Module 3 — regime.py
@@ -484,6 +513,35 @@ class TestRegime:
         from sector_flow.analysis.regime import classify_market_regime
 
         assert classify_market_regime(pd.DataFrame()) == "neutral"
+
+    def test_momentum_all_nan_returns_zero(self):
+        """All-NaN series → dropna gives < 2 items → 0.0."""
+        from sector_flow.analysis.regime import compute_momentum
+
+        assert compute_momentum(pd.Series([np.nan, np.nan, np.nan])) == 0.0
+
+    def test_momentum_too_few_valid_returns_zero(self):
+        """21-item series with window=20 produces only 1 valid pct_change → 0.0."""
+        from sector_flow.analysis.regime import compute_momentum
+
+        prices = pd.Series(range(100, 121, 1), dtype=float)  # 21 items
+        result = compute_momentum(prices, window=20)
+        assert result == 0.0
+
+    def test_momentum_few_historical_under_ten_returns_zero(self):
+        """22-item series with window=20 → 2 valid returns < 10 historical → 0.0."""
+        from sector_flow.analysis.regime import compute_momentum
+
+        prices = pd.Series(range(100, 122, 1), dtype=float)  # 22 items
+        result = compute_momentum(prices, window=20)
+        assert result == 0.0
+
+    def test_sector_regime_all_nan_prices_neutral(self):
+        """classify_sector_regime with all-NaN price series → 'neutral'."""
+        from sector_flow.analysis.regime import classify_sector_regime
+
+        nan_series = pd.Series([np.nan, np.nan, np.nan])
+        assert classify_sector_regime("XLK", nan_series) == "neutral"
 
 
 # ---------------------------------------------------------------------------

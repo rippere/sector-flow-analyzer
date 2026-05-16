@@ -710,6 +710,50 @@ class TestEngine:
         session.close()
         mem_engine.dispose()
 
+    def test_engine_net_inflow_usd_builds_flow_df(self, monkeypatch):
+        """Price rows with net_inflow_usd cause flow_df to be populated (line 124)."""
+        from sector_flow.analysis import engine as engine_module
+        from contextlib import contextmanager
+
+        mem_engine, session = _make_engine_and_session()
+        ETFRepository(session).seed_etfs()
+        session.commit()
+
+        rng = np.random.default_rng(11)
+        base = datetime(2024, 1, 2)
+        n_days = 60
+
+        for ticker, _, _ in SECTOR_ETFS:
+            etf = session.query(SectorETF).filter_by(ticker=ticker).first()
+            prices = 100.0 + np.cumsum(rng.normal(0, 1, n_days))
+            for i in range(n_days):
+                p = float(prices[i])
+                # Set net_inflow_usd on the last row for each ticker
+                inflow = 1_000_000.0 if i == n_days - 1 else None
+                session.add(PriceData(
+                    etf_id=etf.id,
+                    date=base + timedelta(days=i),
+                    open=p, high=p + 1, low=p - 1,
+                    close=p, volume=1e6, adjusted_close=p,
+                    net_inflow_usd=inflow,
+                ))
+        session.commit()
+
+        @contextmanager
+        def _mock_get_session(db_url=None):
+            yield session
+
+        monkeypatch.setattr(engine_module, "get_session", _mock_get_session)
+        monkeypatch.setattr(engine_module, "init_db", lambda db_url=None: None)
+
+        result = engine_module.run_analysis(database_url="sqlite:///:memory:", window=20)
+
+        assert "market_regime" in result
+        assert result["market_regime"] in {"crisis", "risk_on", "risk_off", "rotation", "neutral"}
+
+        session.close()
+        mem_engine.dispose()
+
 
 # ---------------------------------------------------------------------------
 # Module 5 — FlowMetricRepository + CovarianceRepository

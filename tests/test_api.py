@@ -314,6 +314,59 @@ async def test_post_pipeline_backfill_mocked(seeded_engine):
 
 
 # ---------------------------------------------------------------------------
+# Analysis flows tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_analysis_flows_structure(app_with_analysis):
+    app, _ = app_with_analysis
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        resp = await ac.get("/analysis/flows")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "flows" in data
+    assert "correlations" in data
+    assert "computed_at" in data
+
+
+@pytest.mark.asyncio
+async def test_get_analysis_flows_all_sectors(app_with_analysis):
+    app, _ = app_with_analysis
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        resp = await ac.get("/analysis/flows")
+    data = resp.json()
+    tickers_returned = {f["ticker"] for f in data["flows"]}
+    expected = {t for t, _, _ in SECTOR_ETFS}
+    assert tickers_returned == expected
+
+
+@pytest.mark.asyncio
+async def test_get_analysis_flows_momentum_rank_in_range(app_with_analysis):
+    app, _ = app_with_analysis
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        resp = await ac.get("/analysis/flows")
+    data = resp.json()
+    for entry in data["flows"]:
+        rank = entry["momentum_rank"]
+        assert 0.0 <= rank <= 1.0, f"{entry['ticker']} rank {rank} out of [0,1]"
+
+
+@pytest.mark.asyncio
+async def test_get_analysis_flows_correlations_filtered_and_sorted(app_with_analysis):
+    app, _ = app_with_analysis
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        resp = await ac.get("/analysis/flows")
+    data = resp.json()
+    pairs = data["correlations"]
+    for pair in pairs:
+        assert abs(pair["correlation"]) >= 0.3
+        assert pair["ticker_a"] < pair["ticker_b"]
+    if len(pairs) > 1:
+        keys = [(p["ticker_a"], p["ticker_b"]) for p in pairs]
+        assert keys == sorted(keys)
+
+
+# ---------------------------------------------------------------------------
 # Health check
 # ---------------------------------------------------------------------------
 

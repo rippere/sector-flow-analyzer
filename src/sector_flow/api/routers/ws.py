@@ -7,6 +7,8 @@ import time
 from datetime import datetime
 from typing import Set
 
+from datetime import timezone
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
@@ -101,7 +103,7 @@ def _build_flow_message() -> dict:
 
         return {
             "type": "flow_update",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": {
                 "sectors": sectors,
                 "correlations": correlations,
@@ -141,7 +143,7 @@ async def _heartbeat_loop() -> None:
         uptime = int(time.monotonic() - _start_time)
         msg = {
             "type": "heartbeat",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": {"uptime_seconds": uptime},
         }
         dead = set()
@@ -195,7 +197,7 @@ async def websocket_live(websocket: WebSocket) -> None:
             await websocket.send_json(
                 {
                     "type": "error",
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "data": {"message": str(exc)},
                 }
             )

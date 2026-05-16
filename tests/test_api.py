@@ -377,3 +377,33 @@ async def test_health(app_with_db):
         resp = await ac.get("/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_redirects(app_with_db):
+    app, _ = app_with_db
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        follow_redirects=False,
+    ) as ac:
+        resp = await ac.get("/dashboard")
+    assert resp.status_code in (301, 302, 307, 308)
+    assert "/static/dashboard.html" in resp.headers.get("location", "")
+
+
+def test_app_lifespan_startup_and_shutdown():
+    """TestClient triggers the lifespan; verifies init_db + task lifecycle called."""
+    from starlette.testclient import TestClient as SyncTestClient
+    from sector_flow.api.app import app
+
+    with patch("sector_flow.api.app.init_db") as mock_init_db:
+        with patch("sector_flow.api.routers.ws.start_background_tasks") as mock_start:
+            with patch("sector_flow.api.routers.ws.stop_background_tasks") as mock_stop:
+                with SyncTestClient(app) as client:
+                    resp = client.get("/health")
+                    assert resp.status_code == 200
+
+    mock_init_db.assert_called_once()
+    mock_start.assert_called_once()
+    mock_stop.assert_called_once()

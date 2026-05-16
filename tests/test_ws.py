@@ -13,8 +13,10 @@ from sqlalchemy.pool import StaticPool
 from starlette.testclient import TestClient
 
 import sector_flow.api.routers.ws as ws_mod
-from sector_flow.database.models import Base, SECTOR_ETFS, SectorETF, PriceData
+from sector_flow.database.models import Base, SECTOR_ETFS, SectorETF, PriceData, FlowMetric
 
+
+from sector_flow.database.models import CovarianceMatrix
 
 FAKE_FLOW_MSG = {
     "type": "flow_update",
@@ -25,6 +27,40 @@ FAKE_FLOW_MSG = {
         "meta": {"avg_cohesion": 0.0},
     },
 }
+
+
+def _make_seeded_engine_with_covariance():
+    """Seeded engine that also has one CovarianceMatrix pair."""
+    engine = _make_seeded_engine()
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    etfs = session.query(SectorETF).order_by(SectorETF.ticker).all()
+    etf_a, etf_b = etfs[0], etfs[1]
+    session.add(
+        CovarianceMatrix(
+            etf_a_id=etf_a.id,
+            etf_b_id=etf_b.id,
+            window_days=30,
+            computed_at=datetime(2024, 3, 1),
+            covariance=0.001,
+            correlation=0.85,
+        )
+    )
+    # Add a pair where the ticker with higher id comes first (exercises ta>tb swap)
+    etf_z, etf_y = etfs[-1], etfs[-2]
+    session.add(
+        CovarianceMatrix(
+            etf_a_id=etf_z.id,
+            etf_b_id=etf_y.id,
+            window_days=30,
+            computed_at=datetime(2024, 3, 1),
+            covariance=0.0005,
+            correlation=0.15,  # below 0.3 threshold → skipped from correlations list
+        )
+    )
+    session.commit()
+    session.close()
+    return engine
 
 
 def _make_seeded_engine():
@@ -104,6 +140,39 @@ class TestBuildFlowMessage:
             result = ws_mod._build_flow_message()
         for sector_data in result["data"]["sectors"].values():
             assert sector_data["momentum_rank"] == 0.5
+
+    def test_non_uniform_momentum_computes_real_rank(self):
+        """Non-zero momentum range hits the actual rank formula (line 75 new)."""
+        engine = _make_seeded_engine()
+        Session = sessionmaker(bind=engine)
+        session = Session()
+        etfs = session.query(SectorETF).all()
+        analysis_date = datetime(2024, 3, 1)
+        for i, etf in enumerate(etfs):
+            session.add(FlowMetric(
+                etf_id=etf.id,
+                date=analysis_date,
+                metric_name="momentum",
+                value=float(i),
+            ))
+        session.commit()
+        session.close()
+
+        with patch("sqlalchemy.create_engine", return_value=engine):
+            result = ws_mod._build_flow_message()
+
+        ranks = [d["momentum_rank"] for d in result["data"]["sectors"].values()]
+        assert not all(r == 0.5 for r in ranks), "expected non-uniform ranks"
+
+    def test_significant_correlation_included(self):
+        """Covers lines 89-98: correlation loop, ta>tb swap, |corr|>=0.3 filter."""
+        engine = _make_seeded_engine_with_covariance()
+        with patch("sqlalchemy.create_engine", return_value=engine):
+            result = ws_mod._build_flow_message()
+        assert len(result["data"]["correlations"]) >= 1
+        assert result["data"]["meta"]["avg_cohesion"] > 0.0
+        for pair in result["data"]["correlations"]:
+            assert abs(pair["correlation"]) >= 0.3
 
     def test_empty_db_gives_zero_cohesion(self):
         engine = create_engine(

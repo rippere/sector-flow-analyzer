@@ -343,5 +343,80 @@ def query(question: str | None, api_url: str):
     click.echo(output)
 
 
+@main.command(name="flow-import")
+@click.argument("csv_file", type=click.Path(exists=True, dir_okay=False))
+@click.option("--db", default=None, help="Database URL (default: from .env)")
+@click.option("--dry-run", is_flag=True, default=False, help="Validate and preview without writing")
+def flow_import(csv_file: str, db: str | None, dry_run: bool):
+    """Import flow metrics from a CSV file into the FlowMetric table.
+
+    Expected columns: ticker, date, metric_name, value
+
+      ticker      — sector ETF ticker (e.g. XLK, XLF)
+      date        — ISO date string (e.g. 2024-01-15)
+      metric_name — free-form label (e.g. put_call_ratio, unusual_premium_usd)
+      value       — numeric value
+
+    Rows with unknown tickers are skipped with a warning.
+    Existing rows for the same (etf, date, metric_name) are updated in place.
+    """
+    import pandas as pd
+    from sector_flow.database.session import get_session, init_db
+    from sector_flow.database.repository import ETFRepository, FlowMetricRepository
+
+    try:
+        df = pd.read_csv(csv_file)
+    except Exception as exc:
+        raise click.ClickException(f"Cannot read CSV: {exc}") from exc
+
+    required = {"ticker", "date", "metric_name", "value"}
+    missing = required - set(df.columns.str.strip().str.lower())
+    if missing:
+        raise click.ClickException(f"Missing required columns: {missing}")
+
+    df.columns = df.columns.str.strip().str.lower()
+    df["ticker"] = df["ticker"].str.upper().str.strip()
+
+    try:
+        df["date"] = pd.to_datetime(df["date"], utc=True)
+    except Exception as exc:
+        raise click.ClickException(f"Cannot parse date column: {exc}") from exc
+
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    invalid = df["value"].isna().sum()
+    if invalid:
+        click.echo(f"Warning: {invalid} row(s) have non-numeric value — skipped", err=True)
+    df = df.dropna(subset=["value"])
+
+    if dry_run:
+        click.echo(f"[dry-run] {len(df)} valid rows from {csv_file}")
+        click.echo(df.groupby(["ticker", "metric_name"]).size().to_string())
+        return
+
+    init_db(db)
+    saved = skipped = 0
+    with get_session(db) as session:
+        etf_repo = ETFRepository(session)
+        flow_repo = FlowMetricRepository(session)
+
+        for _, row in df.iterrows():
+            etf = etf_repo.get_by_ticker(row["ticker"])
+            if etf is None:
+                click.echo(f"  skip: unknown ticker {row['ticker']!r}", err=True)
+                skipped += 1
+                continue
+            flow_repo.save_metric(
+                etf_id=etf.id,
+                date=row["date"].to_pydatetime(),
+                metric_name=str(row["metric_name"]).strip(),
+                value=float(row["value"]),
+            )
+            saved += 1
+
+        session.commit()
+
+    click.echo(f"flow-import complete: {saved} rows saved, {skipped} skipped")
+
+
 if __name__ == "__main__":
     main()

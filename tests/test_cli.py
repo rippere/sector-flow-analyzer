@@ -535,3 +535,98 @@ def test_build_query_output_distribution_sectors_mentioned():
     with patch("sector_flow.cli.requests.get", side_effect=fake_get):
         output = _build_query_output("http://fake")
     assert "distribution" in output.lower()
+
+
+# ---------------------------------------------------------------------------
+# flow-import
+# ---------------------------------------------------------------------------
+
+
+def _make_flow_db():
+    """In-memory DB seeded with all SECTOR_ETFS (no price data needed)."""
+    from sector_flow.database.models import FlowMetric
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    for ticker, sector_name, sector_code in SECTOR_ETFS:
+        session.add(SectorETF(ticker=ticker, sector_name=sector_name, sector_code=sector_code))
+    session.commit()
+    session.close()
+    return engine, Session
+
+
+def test_flow_import_happy_path(runner, tmp_path):
+    engine, Session = _make_flow_db()
+    csv_file = tmp_path / "flow.csv"
+    csv_file.write_text("ticker,date,metric_name,value\nXLK,2024-01-15,put_call_ratio,0.75\nXLF,2024-01-15,put_call_ratio,1.10\n")
+
+    ctx = _session_ctx(Session)
+    with patch("sector_flow.database.session.get_session", ctx), \
+         patch("sector_flow.database.session.init_db"):
+        result = runner.invoke(main, ["flow-import", str(csv_file)])
+
+    assert result.exit_code == 0, result.output
+    assert "2 rows saved" in result.output
+
+
+def test_flow_import_unknown_ticker_skipped(runner, tmp_path):
+    engine, Session = _make_flow_db()
+    csv_file = tmp_path / "flow.csv"
+    csv_file.write_text("ticker,date,metric_name,value\nXXX,2024-01-15,put_call_ratio,0.5\nXLK,2024-01-15,put_call_ratio,0.75\n")
+
+    ctx = _session_ctx(Session)
+    with patch("sector_flow.database.session.get_session", ctx), \
+         patch("sector_flow.database.session.init_db"):
+        result = runner.invoke(main, ["flow-import", str(csv_file)])
+
+    assert result.exit_code == 0
+    assert "1 rows saved" in result.output
+    assert "1 skipped" in result.output
+
+
+def test_flow_import_missing_columns_errors(runner, tmp_path):
+    csv_file = tmp_path / "bad.csv"
+    csv_file.write_text("ticker,date\nXLK,2024-01-15\n")
+
+    result = runner.invoke(main, ["flow-import", str(csv_file)])
+
+    assert result.exit_code != 0
+    assert "Missing required columns" in result.output
+
+
+def test_flow_import_nonnumeric_value_skipped(runner, tmp_path):
+    engine, Session = _make_flow_db()
+    csv_file = tmp_path / "flow.csv"
+    csv_file.write_text("ticker,date,metric_name,value\nXLK,2024-01-15,put_call_ratio,N/A\nXLF,2024-01-15,put_call_ratio,1.2\n")
+
+    ctx = _session_ctx(Session)
+    with patch("sector_flow.database.session.get_session", ctx), \
+         patch("sector_flow.database.session.init_db"):
+        result = runner.invoke(main, ["flow-import", str(csv_file)])
+
+    assert result.exit_code == 0
+    assert "1 rows saved" in result.output
+
+
+def test_flow_import_dry_run_no_writes(runner, tmp_path):
+    engine, Session = _make_flow_db()
+    csv_file = tmp_path / "flow.csv"
+    csv_file.write_text("ticker,date,metric_name,value\nXLK,2024-01-15,put_call_ratio,0.75\n")
+
+    ctx = _session_ctx(Session)
+    with patch("sector_flow.database.session.get_session", ctx), \
+         patch("sector_flow.database.session.init_db"):
+        result = runner.invoke(main, ["flow-import", "--dry-run", str(csv_file)])
+
+    assert result.exit_code == 0
+    assert "dry-run" in result.output
+    # No DB write — verify FlowMetric table is empty
+    with Session() as s:
+        from sector_flow.database.models import FlowMetric
+        count = s.query(FlowMetric).count()
+    assert count == 0

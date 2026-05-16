@@ -7,7 +7,11 @@ classification, and database persistence.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 from typing import Optional
 
 import pandas as pd
@@ -129,7 +133,7 @@ def run_analysis(
         sector_regimes: dict[str, str] = {}
         sector_momentum: dict[str, float] = {}
 
-        analysis_date = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        analysis_date = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
 
         for ticker in TICKERS:
             etf = etf_map.get(ticker)
@@ -177,7 +181,7 @@ def run_analysis(
         # 9. Persist covariance pairs to CovarianceMatrix
         latest_pairs = compute_pairwise_latest(price_df, window=window)
         enriched_pairs = []
-        computed_at = datetime.utcnow()
+        computed_at = _utcnow()
         for pair in latest_pairs:
             etf_a = etf_map.get(pair["ticker_a"])
             etf_b = etf_map.get(pair["ticker_b"])

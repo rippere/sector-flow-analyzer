@@ -1,6 +1,10 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 import math
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 from sector_flow.database.models import SectorETF, PriceData, CovarianceMatrix, FlowMetric, SECTOR_ETFS
@@ -153,7 +157,7 @@ class FlowMetricRepository:
         )
         if existing is not None:
             existing.value = value
-            existing.computed_at = datetime.utcnow()
+            existing.computed_at = _utcnow()
         else:
             self.session.add(
                 FlowMetric(
@@ -161,7 +165,7 @@ class FlowMetricRepository:
                     date=date,
                     metric_name=metric_name,
                     value=value,
-                    computed_at=datetime.utcnow(),
+                    computed_at=_utcnow(),
                 )
             )
         self.session.flush()

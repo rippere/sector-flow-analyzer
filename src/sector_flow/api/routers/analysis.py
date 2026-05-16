@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -84,7 +84,7 @@ def _get_regime_snapshot(db: Session) -> dict:
         "total_pairs": total_pairs,
         "sector_regimes": sector_regimes,
         "sector_momentum": sector_momentum,
-        "computed_at": datetime.utcnow().isoformat(),
+        "computed_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     }
 
 
@@ -184,7 +184,7 @@ def get_flows(db: Session = Depends(get_db)) -> FlowAnalysisResponse:
     return FlowAnalysisResponse(
         flows=flows,
         correlations=correlations,
-        computed_at=datetime.utcnow().isoformat(),
+        computed_at=datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     )
 
 

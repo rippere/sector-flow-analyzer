@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import (
     Column, Integer, String, Float, DateTime,
     ForeignKey, UniqueConstraint, JSON
@@ -6,6 +6,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 SECTOR_ETFS = [
     # US Equity Sectors (SPDR)
@@ -42,8 +46,8 @@ class SectorETF(Base):
     sector_name = Column(String(100), nullable=False)
     sector_code = Column(String(20))
     description = Column(String(500))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
     price_data = relationship("PriceData", back_populates="etf", cascade="all, delete-orphan")
     covariance_matrices = relationship(
@@ -70,7 +74,7 @@ class PriceData(Base):
     net_inflow_usd = Column(Float, nullable=True)
     shares_outstanding = Column(Float, nullable=True)
     aum_usd = Column(Float, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
 
     etf = relationship("SectorETF", back_populates="price_data")
 
@@ -87,7 +91,7 @@ class CovarianceMatrix(Base):
     etf_a_id = Column(Integer, ForeignKey("sector_etfs.id"), nullable=False)
     etf_b_id = Column(Integer, ForeignKey("sector_etfs.id"), nullable=False)
     window_days = Column(Integer, nullable=False)
-    computed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    computed_at = Column(DateTime, nullable=False, default=_utcnow)
     covariance = Column(Float)
     correlation = Column(Float)
     metadata_ = Column("metadata", JSON)
@@ -109,7 +113,7 @@ class FlowMetric(Base):
     date = Column(DateTime, nullable=False, index=True)
     metric_name = Column(String(100), nullable=False)
     value = Column(Float, nullable=False)
-    computed_at = Column(DateTime, default=datetime.utcnow)
+    computed_at = Column(DateTime, default=_utcnow)
     metadata_ = Column("metadata", JSON)
 
     __table_args__ = (

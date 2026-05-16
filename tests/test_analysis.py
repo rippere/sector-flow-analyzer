@@ -581,6 +581,77 @@ class TestEngine:
         session.close()
         mem_engine.dispose()
 
+    def test_engine_empty_price_data_returns_defaults(self, monkeypatch):
+        """run_analysis with ETFs seeded but no price rows returns safe defaults."""
+        from sector_flow.analysis import engine as engine_module
+        from contextlib import contextmanager
+
+        mem_engine, session = _make_engine_and_session()
+        # Seed ETFs only — no price rows, so price_df will be empty
+        ETFRepository(session).seed_etfs()
+        session.commit()
+
+        @contextmanager
+        def _mock_get_session(db_url=None):
+            yield session
+
+        monkeypatch.setattr(engine_module, "get_session", _mock_get_session)
+        monkeypatch.setattr(engine_module, "init_db", lambda db_url=None: None)
+
+        result = engine_module.run_analysis(database_url="sqlite:///:memory:", window=20)
+
+        assert result["market_regime"] == "neutral"
+        assert result["cohesion"] == 0.0
+        assert result["significant_pairs"] == 0
+        assert result["total_pairs"] == 0
+
+        session.close()
+        mem_engine.dispose()
+
+    def test_engine_partial_price_data_neutral_for_missing(self, monkeypatch):
+        """Tickers with no price rows get neutral regime and 0.0 momentum."""
+        from sector_flow.analysis import engine as engine_module
+        from contextlib import contextmanager
+
+        mem_engine, session = _make_engine_and_session()
+        etf_repo = ETFRepository(session)
+        price_repo = PriceRepository(session)
+        etf_repo.seed_etfs()
+        session.commit()
+
+        # Only seed price data for XLK (one ticker) with enough days
+        rng = np.random.default_rng(7)
+        base = datetime(2024, 1, 2)
+        xlk = session.query(SectorETF).filter_by(ticker="XLK").first()
+        prices = 100.0 + np.cumsum(rng.normal(0, 1, 60))
+        for i in range(60):
+            p = float(prices[i])
+            session.add(PriceData(
+                etf_id=xlk.id, date=base + timedelta(days=i),
+                open=p, high=p + 1, low=p - 1, close=p, volume=1e6, adjusted_close=p,
+            ))
+        session.commit()
+
+        @contextmanager
+        def _mock_get_session(db_url=None):
+            yield session
+
+        monkeypatch.setattr(engine_module, "get_session", _mock_get_session)
+        monkeypatch.setattr(engine_module, "init_db", lambda db_url=None: None)
+
+        result = engine_module.run_analysis(database_url="sqlite:///:memory:", window=20)
+
+        # Tickers without price data must appear as neutral/0.0
+        for ticker in TICKERS:
+            if ticker != "XLK":
+                assert result["sector_regimes"].get(ticker) == "neutral", \
+                    f"{ticker} should be neutral but got {result['sector_regimes'].get(ticker)}"
+                assert result["sector_momentum"].get(ticker) == 0.0, \
+                    f"{ticker} momentum should be 0.0 but got {result['sector_momentum'].get(ticker)}"
+
+        session.close()
+        mem_engine.dispose()
+
 
 # ---------------------------------------------------------------------------
 # Module 5 — FlowMetricRepository + CovarianceRepository

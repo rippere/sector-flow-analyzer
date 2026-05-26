@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily signal alert — 8:45am ET (13:45 UTC) Mon–Fri, after analyze
+
+[Timer]
+OnCalendar=Mon..Fri 13:45:00 UTC
+RandomizedDelaySec=30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,6 +1,6 @@
 [Unit]
-Description=Sector Flow Analyzer — daily signal alert (writes to Alfred inbox on signal)
-After=sector-flow-analyze.service
+Description=Sector Flow Analyzer — daily SSGA signal alert (writes to Alfred inbox on signal)
+After=network-online.target
 
 [Service]
 Type=oneshot
@@ -9,6 +9,6 @@ Environment="HOME=/home/rippere"
 Environment="PYTHONUNBUFFERED=1"
 Environment="DATABASE_URL=sqlite:////home/rippere/.sector_flow/sector_flow.db"
 UnsetEnvironment=CLAUDECODE
-ExecStart=/mnt/external/Projects/sector-flow-analyzer/.venv/bin/python /mnt/external/Projects/sector-flow-analyzer/deploy/sector-flow-alert.py
+ExecStart=/home/rippere/.local/bin/uv run python /mnt/external/Projects/sector-flow-analyzer/deploy/sector-flow-alert.py
 StandardOutput=append:/home/rippere/.sector_flow/logs/cron.log
 StandardError=append:/home/rippere/.sector_flow/logs/cron.log

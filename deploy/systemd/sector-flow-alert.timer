@@ -1,8 +1,8 @@
 [Unit]
-Description=Daily signal alert — 8:45am ET (13:45 UTC) Mon–Fri, after analyze
+Description=Daily SSGA signal alert — 07:00 America/Los_Angeles every day
 
 [Timer]
-OnCalendar=Mon..Fri 13:45:00 UTC
+OnCalendar=*-*-* 07:00:00 America/Los_Angeles
 RandomizedDelaySec=30
 Persistent=true
 

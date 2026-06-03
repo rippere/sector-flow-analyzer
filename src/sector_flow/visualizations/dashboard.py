@@ -12,6 +12,7 @@ from typing import Any
 
 import requests
 import requests.exceptions
+import numpy  # noqa: F401 — eager import: plotly lazily imports numpy inside callback threads, which can race a partial init (blank chart + 500 on the first callback after a cold start)
 import networkx as nx
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, callback_context, dcc, html, dash_table

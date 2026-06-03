@@ -53,6 +53,26 @@
       display: none;
     }
     #tooltip .t-ticker { font-size: 14px; font-weight: bold; margin-bottom: 4px; }
+
+    #ledger {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      background: rgba(22, 27, 34, 0.85);
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: 11px;
+      line-height: 1.9;
+      pointer-events: none;
+      min-width: 215px;
+    }
+    #ledger .l-title { color: #8b949e; font-size: 10px; letter-spacing: 1px; margin-bottom: 4px; }
+    #ledger .l-row { display: flex; align-items: center; gap: 8px; }
+    #ledger .l-tick { width: 40px; font-weight: bold; }
+    #ledger .l-bar { flex: 1; height: 4px; background: rgba(255,255,255,0.06); border-radius: 2px; overflow: hidden; display: inline-block; }
+    #ledger .l-fill { display: block; height: 100%; border-radius: 2px; }
+    #ledger .l-val { width: 64px; text-align: right; font-weight: bold; }
   </style>
 </head>
 <body>
@@ -64,6 +84,7 @@
     <div><span class="label">dominant  </span><span class="value" id="hud-dominant">—</span></div>
     <div><span class="label">updated   </span><span class="value" id="hud-ts">—</span></div>
     <div><span class="label">flows     </span><span id="hud-flows">—</span></div>
+    <div><span class="label">in / out  </span><span class="value" id="hud-story">—</span></div>
   </div>
 
   <div id="legend">
@@ -75,6 +96,11 @@
   </div>
 
   <div id="tooltip"></div>
+
+  <div id="ledger">
+    <div class="l-title">NET FLOWS — RANKED (USD)</div>
+    <div id="ledger-rows"></div>
+  </div>
 
   <script>
     const SECTOR_COLORS = {
@@ -146,8 +172,20 @@
     let cohesionLevel = 0;      // 0–1, updated from WS/REST
     let dominantTicker = null;  // ticker string or null
 
+    // Presentation override: ?live forces full opacity outside market hours.
+    // Sticky — persists in localStorage so follow-up visits (including the
+    // /dashboard redirect, which DROPS query params) stay in live mode.
+    // Visit once with ?kiosk to restore normal market-hours dimming.
+    const _params = new URLSearchParams(location.search);
+    if (_params.has("live"))  try { localStorage.setItem("sfa_live", "1"); } catch (e) {}
+    if (_params.has("kiosk")) try { localStorage.removeItem("sfa_live"); } catch (e) {}
+    let _stickyLive = false;
+    try { _stickyLive = localStorage.getItem("sfa_live") === "1"; } catch (e) {}
+    const FORCE_LIVE = _params.has("live") || _stickyLive;
+
     // Market hours in ET — returns [0,1] opacity multiplier
     function marketOpacity() {
+      if (FORCE_LIVE) return 1.0;
       const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
       const day = et.getDay();           // 0=Sun 6=Sat
       const h = et.getHours();
@@ -182,9 +220,23 @@
     function pulseDuration(norm) {
       return 4500 - Math.pow(norm, 0.8) * 2500;  // 4500ms → 2000ms
     }
-    // norm [0,1] → simultaneous pulses: always 1, only 2 on very high flow
+    // --- Flow-animation tuning (perception-research backed) ---
+    // Top-K largest flows get continuous comets; remaining flow edges fire in a
+    // coordinated heartbeat wave; correlation-only edges stay static structure.
+    // Speed is CAPPED and uniform — magnitude reads as density/glow, never
+    // velocity. Tracking capacity is a speed-dependent attentional resource, and
+    // identity+direction tracking collapses to ~1-2 objects (Franconeri et al.
+    // 2026; Alvarez & Franconeri 2007). Common-fate wave release groups the
+    // background pulses into ONE perceived motion (Fisher 2010).
+    const FLOW_TOP_K = 4;            // edges with continuous comets
+    const COMET_SPEED_MS = 2800;     // fixed traversal time — no speed scaling
+    const MAX_COMETS_PER_EDGE = 3;   // bounded density (Meeks encoding, capped)
+    const HEARTBEAT_PERIOD = 3200;   // ms between coordinated background waves
+    const HEARTBEAT_TRAVEL = 1500;   // ms a wave pulse takes to cross its edge
+
+    // norm [0,1] → comet count for top-K edges (density encodes magnitude)
     function pulseCount(norm) {
-      return norm > 0.75 ? 2 : 1;
+      return 1 + Math.round(norm * (MAX_COMETS_PER_EDGE - 1));
     }
 
     // Draw one animated band between two points
@@ -207,61 +259,112 @@
       const srcColor  = SECTOR_COLORS[towardSrc ? tgtId : srcId] || "#8b949e";
 
       const w = bandWidth(norm);
+      const hasFlowEdge = link.flow_magnitude != null;
+
+      // --- Curved particle highway (Meeks pattern) ---
+      // Bow every chord outward so edges stop crossing through the ring centre.
+      // Control point sits perpendicular to the midpoint; bow side is
+      // deterministic per pair so the curve is stable frame-to-frame.
+      const mdx = (sx + tx) / 2, mdy = (sy + ty) / 2;
+      const ddx = tx - sx, ddy = ty - sy;
+      const clen = Math.sqrt(ddx * ddx + ddy * ddy);
+      if (clen === 0) { ctx.restore(); return; }
+      const bowDir = String(srcId) < String(tgtId) ? 1 : -1;
+      const bow = clen * 0.22 * bowDir;
+      const cqx = mdx + (-ddy / clen) * bow;
+      const cqy = mdy + ( ddx / clen) * bow;
+      // Quadratic point in pulse-travel space (from→to); the control point is
+      // symmetric in the endpoints so the same curve serves both directions.
+      const qPoint = (t) => {
+        const u = 1 - t;
+        return [
+          u * u * fromX + 2 * u * t * cqx + t * t * toX,
+          u * u * fromY + 2 * u * t * cqy + t * t * toY,
+        ];
+      };
 
       // --- Base pipe ---
       ctx.save();
       ctx.beginPath();
       ctx.moveTo(sx, sy);
-      ctx.lineTo(tx, ty);
+      ctx.quadraticCurveTo(cqx, cqy, tx, ty);
       ctx.lineWidth = w;
       ctx.lineCap = "round";
-      // Pipe color — cross-asset edges rendered greyer to stay secondary
+      // Pipe color — flow-bearing edges read brighter; corr-only and
+      // cross-asset edges stay secondary structure
       const mOp = marketOpacity();
       const isCrossAsset = MACRO_TICKERS.has(srcId) !== MACRO_TICKERS.has(tgtId);
       const isMacroMacro = MACRO_TICKERS.has(srcId) && MACRO_TICKERS.has(tgtId);
+      // Luminance hierarchy: top-K flows bright signal, other flows mid,
+      // correlation-only structure dimmed to a calm base
+      const isTopFlow = hasFlowEdge && link.flowRank != null && link.flowRank < FLOW_TOP_K;
+      const pipeBoost = isTopFlow ? 1.8 : hasFlowEdge ? 0.95 : 0.4;
 
       if (isCrossAsset || isMacroMacro) {
         ctx.strokeStyle = corr >= 0
-          ? `rgba(180, 200, 220, ${(0.03 + norm * 0.07) * mOp})`
-          : `rgba(220, 180, 160, ${(0.03 + norm * 0.07) * mOp})`;
+          ? `rgba(180, 200, 220, ${(0.03 + norm * 0.07) * mOp * pipeBoost})`
+          : `rgba(220, 180, 160, ${(0.03 + norm * 0.07) * mOp * pipeBoost})`;
       } else {
         ctx.strokeStyle = corr >= 0
-          ? `rgba(88, 166, 255, ${(0.04 + norm * 0.10) * mOp})`
-          : `rgba(255, 112, 67, ${(0.04 + norm * 0.10) * mOp})`;
+          ? `rgba(88, 166, 255, ${(0.04 + norm * 0.10) * mOp * pipeBoost})`
+          : `rgba(255, 112, 67, ${(0.04 + norm * 0.10) * mOp * pipeBoost})`;
       }
       ctx.stroke();
 
-      // --- Animated pulses ---
+      // --- Tiered animation ---
+      // top-K flows: continuous comets · other flows: coordinated heartbeat
+      // wave · correlation-only: static, no pulses
       const now = Date.now();
-      const dur  = pulseDuration(norm);
-      const n    = pulseCount(norm);
-      const dx = toX - fromX, dy = toY - fromY;
-      const len  = Math.sqrt(dx * dx + dy * dy);
-      if (len === 0) { ctx.restore(); return; }
+      const aHex = (v) => Math.round(Math.max(0, Math.min(1, v)) * 255)
+        .toString(16).padStart(2, "0");
 
-      for (let i = 0; i < n; i++) {
-        const t = ((now / dur) + i / n) % 1;
-        const px = fromX + dx * t;
-        const py = fromY + dy * t;
+      const drawComet = (t, scale, withHalo, trail) => {
+        for (let k = 0; k <= trail; k++) {
+          const tt = t - k * 0.022;
+          if (tt < 0) continue;
+          // Landing-zone clearance: particles fade in after leaving the source
+          // and dissolve BEFORE reaching the destination, so node faces, labels
+          // and dollar figures are never buried under arriving traffic
+          const env = tt < 0.1 ? tt / 0.1 : tt > 0.84 ? Math.max(0, (0.96 - tt) / 0.12) : 1;
+          if (env <= 0) continue;
+          const [px, py] = qPoint(tt);
+          const fade = (1 - k / (trail + 1)) * env;
+          const gr = (w * 1.6 + 3) * scale * (k === 0 ? 1 : 0.7 * fade + 0.3);
 
-        // Pulse glow radius — tight, doesn't bleed beyond the band much
-        const gr = w * 1.3 + 2;
+          ctx.save();
+          ctx.globalCompositeOperation = "lighter";
+          if (k === 0 && withHalo) {
+            // White-hot lead particle with neon halo — reserved for the signal tier
+            ctx.shadowBlur = 18;
+            ctx.shadowColor = destColor;
+          }
+          const grd = ctx.createRadialGradient(px, py, 0, px, py, gr);
+          const core = (k === 0 ? (withHalo ? 0.85 : 0.5) * env : 0.34 * fade) * mOp;
+          grd.addColorStop(0,    `rgba(255,255,255,${core})`);
+          grd.addColorStop(0.25, destColor + aHex((withHalo ? 0.75 : 0.5) * fade * mOp));
+          grd.addColorStop(0.6,  destColor + aHex(0.25 * fade * mOp));
+          grd.addColorStop(1,    "transparent");
+          ctx.beginPath();
+          ctx.arc(px, py, gr, 0, 2 * Math.PI);
+          ctx.fillStyle = grd;
+          ctx.fill();
+          ctx.restore();
+        }
+      };
 
-        ctx.save();
-        ctx.globalCompositeOperation = "lighter";
-        const grd = ctx.createRadialGradient(px, py, 0, px, py, gr);
-        const pa = Math.round(0x99 * mOp).toString(16).padStart(2,"0");
-        const pb = Math.round(0xcc * mOp).toString(16).padStart(2,"0");
-        const pc = Math.round(0x44 * mOp).toString(16).padStart(2,"0");
-        grd.addColorStop(0,   `rgba(255,255,255,${0.6 * mOp})`);
-        grd.addColorStop(0.2, destColor + pb);
-        grd.addColorStop(0.6, destColor + pc);
-        grd.addColorStop(1,   "transparent");
-        ctx.beginPath();
-        ctx.arc(px, py, gr, 0, 2 * Math.PI);
-        ctx.fillStyle = grd;
-        ctx.fill();
-        ctx.restore();
+      if (isTopFlow) {
+        // Continuous comets — density encodes magnitude, speed stays capped
+        const n = pulseCount(norm);
+        for (let i = 0; i < n; i++) {
+          const t = ((now / COMET_SPEED_MS) + i / n) % 1;
+          drawComet(t, 1.25, true, 4);
+        }
+      } else if (hasFlowEdge) {
+        // Heartbeat — every background flow releases ONE pulse on a shared
+        // clock at the same speed; common fate groups them into a single
+        // perceived wave, then the graph settles back to calm structure
+        const phase = (now % HEARTBEAT_PERIOD) / HEARTBEAT_TRAVEL;
+        if (phase <= 1) drawComet(phase, 0.85, false, 2);
       }
 
       ctx.restore();
@@ -429,7 +532,11 @@
         ctx.fillStyle = "#e6edf3";
         ctx.fillText(node.id, x, y);
 
-        // 8. Sector name below node
+        // 8. Sector name below node — dark text-shadow keeps labels readable
+        // over any motion or glow behind them
+        ctx.save();
+        ctx.shadowColor = "rgba(0,0,0,0.95)";
+        ctx.shadowBlur = 4;
         const nameSize = Math.max(9, r * 0.36);
         const labelY = y + r + (hasFlow ? Math.max(2, r * 0.14) + 4 : 4) + 5;
         ctx.font = `${nameSize}px monospace`;
@@ -437,13 +544,14 @@
         ctx.textBaseline = "top";
         ctx.fillText(SECTOR_NAMES[node.id] || node.id, x, labelY);
 
-        // 9. Flow amount below name
+        // 9. Flow amount below name — full contrast: this is the readable verdict
         if (hasFlow) {
-          const valSize = Math.max(8, r * 0.32);
+          const valSize = Math.max(9, r * 0.38);
           ctx.font = `bold ${valSize}px monospace`;
-          ctx.fillStyle = flowColor + "cc";
+          ctx.fillStyle = flowColor;
           ctx.fillText(fmt_usd(inflow), x, labelY + nameSize + 3);
         }
+        ctx.restore();
       })
       .nodePointerAreaPaint((node, color, ctx) => {
         ctx.beginPath();
@@ -587,8 +695,30 @@
         };
       });
 
+      // Rank signed flows for the tiered renderer (top-K = continuous comets),
+      // then apply the cartographic draw-order rule: larger flows paint first
+      // (back), smaller flows last (front) — Phan 2005 / Jenny et al. 2017
+      const flowLinks = links
+        .filter(l => l.flow_magnitude != null)
+        .sort((a, b) => Math.abs(b.flow_magnitude) - Math.abs(a.flow_magnitude));
+      flowLinks.forEach((l, i) => { l.flowRank = i; });
+      links.sort((a, b) => {
+        const fa = a.flow_magnitude != null, fb = b.flow_magnitude != null;
+        if (fa !== fb) return fa ? 1 : -1;     // correlation-only structure to the back
+        if (!fa) return 0;
+        return Math.abs(b.flow_magnitude) - Math.abs(a.flow_magnitude);
+      });
+
       graphData = { nodes, links };
       Graph.graphData(graphData);
+
+      // One-time camera fit: nodes are pinned in screen-pixel coords centred at
+      // (W/2, H/2), but the camera boots at graph-origin (0,0) — without this the
+      // ring sits off-screen until a node is clicked.
+      if (!applyFlowUpdate._fitted) {
+        applyFlowUpdate._fitted = true;
+        setTimeout(() => Graph.zoomToFit(400, 45), 150);
+      }
 
       // Update ambient state
       cohesionLevel = meta.avg_cohesion ?? 0;
@@ -619,6 +749,33 @@
 
       document.getElementById("hud-ts").textContent =
         new Date().toLocaleTimeString();
+
+      // Ranked flow ledger — the readable, utilizable layer: every sector's
+      // signed net flow as an actual dollar figure, sorted gainers → bleeders
+      const rowsEl = document.getElementById("ledger-rows");
+      if (rowsEl) {
+        const ranked = nodes
+          .filter(n => n.net_inflow_usd != null)
+          .sort((a, b) => b.net_inflow_usd - a.net_inflow_usd);
+        const maxAbs = Math.max(...ranked.map(n => Math.abs(n.net_inflow_usd)), 1);
+        rowsEl.innerHTML = ranked.map(n => {
+          const v = n.net_inflow_usd;
+          const col = v >= 0 ? "#3fb950" : "#f85149";
+          const wPct = Math.max(2, Math.round(Math.abs(v) / maxAbs * 100));
+          return `<div class="l-row">` +
+            `<span class="l-tick" style="color:${n.color}">${n.id}</span>` +
+            `<span class="l-bar"><span class="l-fill" style="width:${wPct}%;background:${col}"></span></span>` +
+            `<span class="l-val" style="color:${col}">${fmt_usd(v)}</span>` +
+            `</div>`;
+        }).join("");
+
+        const st = document.getElementById("hud-story");
+        if (st && ranked.length) {
+          const top = ranked[0], bot = ranked[ranked.length - 1];
+          st.textContent =
+            `${top.id} ${fmt_usd(top.net_inflow_usd)} / ${bot.id} ${fmt_usd(bot.net_inflow_usd)}`;
+        }
+      }
     }
 
     // --- WebSocket ---

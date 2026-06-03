@@ -123,12 +123,15 @@ def get_flows(db: Session = Depends(get_db)) -> FlowAnalysisResponse:
         mom = flow_repo.get_latest(etf.id, "momentum")
         raw_momentum[ticker] = mom if mom is not None else 0.0
 
-        # net_inflow_usd and aum_usd live in PriceData (from SSGA collector)
+        # net_inflow_usd and aum_usd live in PriceData (from SSGA collector).
+        # The market bar lands hours before each day's SSGA snapshot (and the
+        # snapshot file itself lags a day), so the newest row is often bar-only —
+        # serve the latest SNAPSHOT-BEARING row rather than None.
         rows = price_repo.get_price_data(etf.id)
-        if rows:
-            latest = rows[-1]
-            raw_flow[ticker] = latest.net_inflow_usd
-            raw_aum[ticker] = latest.aum_usd
+        snap = next((r for r in reversed(rows) if r.aum_usd is not None), None)
+        if snap is not None:
+            raw_flow[ticker] = snap.net_inflow_usd
+            raw_aum[ticker] = snap.aum_usd
         else:
             raw_flow[ticker] = None
             raw_aum[ticker] = None

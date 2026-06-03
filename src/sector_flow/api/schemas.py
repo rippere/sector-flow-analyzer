@@ -64,6 +64,7 @@ class SectorFlowEntry(BaseModel):
     net_inflow_usd: Optional[float]   # None if SSGA data not yet ingested
     aum_usd: Optional[float]
     momentum_rank: float               # [0.0, 1.0] cross-sectional min-max of raw momentum
+    momentum: Optional[float] = None   # raw engine momentum, ~[-1, 1] — fixed dial scale
 
 
 class FlowAnalysisResponse(BaseModel):

@@ -88,11 +88,13 @@
   </div>
 
   <div id="legend">
-    <div class="row"><div class="swatch" style="background:#58a6ff"></div><span>positive correlation</span></div>
-    <div class="row"><div class="swatch" style="background:#ff7043"></div><span>negative correlation</span></div>
+    <div class="row"><div class="swatch" style="background:#58a6ff"></div><span>positive correlation — solid</span></div>
+    <div class="row"><div class="swatch" style="background:repeating-linear-gradient(90deg,#ff7043 0 5px,transparent 5px 9px)"></div><span>negative correlation — dashed</span></div>
     <div class="row" style="margin-top:4px"><div class="swatch" style="background:#3fb950"></div><span>net inflow</span></div>
     <div class="row"><div class="swatch" style="background:#f85149"></div><span>net outflow</span></div>
-    <div class="row" style="margin-top:4px; color:#8b949e"><span>arc = momentum rank &nbsp;|&nbsp; size = AUM</span></div>
+    <div class="row" style="margin-top:4px"><div class="swatch" style="background:#3ddbd9"></div><span>momentum dial + (cw from 12:00)</span></div>
+    <div class="row"><div class="swatch" style="background:#ff7eb6"></div><span>momentum dial − (ccw) · ½-ring = |1.0|</span></div>
+    <div class="row" style="color:#8b949e"><span>size = AUM</span></div>
   </div>
 
   <div id="tooltip"></div>
@@ -300,16 +302,22 @@
       const isTopFlow = hasFlowEdge && link.flowRank != null && link.flowRank < FLOW_TOP_K;
       const pipeBoost = isTopFlow ? 1.8 : hasFlowEdge ? 0.95 : 0.4;
 
+      // Negative correlation renders DASHED — hue alone doesn't separate the
+      // two classes at calm-tier luminance on a dark background. Negatives
+      // also get a slightly higher alpha floor: inverse movers are the rarer,
+      // more notable signal.
+      ctx.setLineDash(corr < 0 ? [7, 7] : []);
       if (isCrossAsset || isMacroMacro) {
         ctx.strokeStyle = corr >= 0
-          ? `rgba(180, 200, 220, ${(0.03 + norm * 0.07) * mOp * pipeBoost})`
-          : `rgba(220, 180, 160, ${(0.03 + norm * 0.07) * mOp * pipeBoost})`;
+          ? `rgba(180, 200, 220, ${(0.06 + norm * 0.08) * mOp * pipeBoost})`
+          : `rgba(235, 165, 140, ${(0.07 + norm * 0.09) * mOp * pipeBoost})`;
       } else {
         ctx.strokeStyle = corr >= 0
-          ? `rgba(88, 166, 255, ${(0.04 + norm * 0.10) * mOp * pipeBoost})`
-          : `rgba(255, 112, 67, ${(0.04 + norm * 0.10) * mOp * pipeBoost})`;
+          ? `rgba(88, 166, 255, ${(0.08 + norm * 0.12) * mOp * pipeBoost})`
+          : `rgba(255, 105, 60, ${(0.09 + norm * 0.13) * mOp * pipeBoost})`;
       }
       ctx.stroke();
+      ctx.setLineDash([]);
 
       // --- Tiered animation ---
       // top-K flows: continuous comets · other flows: coordinated heartbeat
@@ -498,27 +506,31 @@
         ctx.stroke();
         ctx.restore();
 
-        // 6. Momentum arc — clockwise from top, fraction of full circle = momentum rank
-        //    Background track (full circle, very dim)
+        // 6. Momentum DIAL — fixed ±1 scale, signed, anchored at 12 o'clock:
+        //    clockwise cyan = positive momentum, counter-clockwise magenta =
+        //    negative; HALF-RING = |1.0|. Same scale every day, every sector —
+        //    a readable metric, not a relative decoration.
+        const arcR = r + (hasFlow ? Math.max(2, r * 0.14) + 2.5 : 2.5);
         ctx.beginPath();
-        ctx.arc(x, y, r + (hasFlow ? Math.max(2, r * 0.14) + 2.5 : 2.5), 0, 2 * Math.PI);
+        ctx.arc(x, y, arcR, 0, 2 * Math.PI);
         ctx.strokeStyle = "rgba(255,255,255,0.05)";
         ctx.lineWidth = 2;
         ctx.stroke();
 
-        if (momRank > 0.02) {
+        const momRaw = node.momentum;
+        if (momRaw != null && Math.abs(momRaw) > 0.02) {
+          const m = Math.max(-1, Math.min(1, momRaw));
           const arcStart = -Math.PI / 2;
-          const arcEnd   = arcStart + momRank * 2 * Math.PI;
-          const arcR     = r + (hasFlow ? Math.max(2, r * 0.14) + 2.5 : 2.5);
+          const sweep = Math.abs(m) * Math.PI;   // half-ring = |1.0|
           ctx.save();
           ctx.globalCompositeOperation = "lighter";
           ctx.beginPath();
-          ctx.arc(x, y, arcR, arcStart, arcEnd);
-          // Brightness scales with rank — top performers glow brightest
-          const arcAlpha = 0.25 + momRank * 0.55;
-          const arcHex   = Math.round(arcAlpha * 255).toString(16).padStart(2, "0");
-          ctx.strokeStyle = node.color + arcHex;
-          ctx.lineWidth = 2.2;
+          if (m >= 0) ctx.arc(x, y, arcR, arcStart, arcStart + sweep);
+          else        ctx.arc(x, y, arcR, arcStart - sweep, arcStart);
+          const arcAlpha = 0.35 + Math.abs(m) * 0.5;
+          const arcHex = Math.round(arcAlpha * 255).toString(16).padStart(2, "0");
+          ctx.strokeStyle = (m >= 0 ? "#3ddbd9" : "#ff7eb6") + arcHex;
+          ctx.lineWidth = 2.4;
           ctx.lineCap = "round";
           ctx.stroke();
           ctx.restore();
@@ -569,7 +581,7 @@
           <div>${SECTOR_NAMES[node.id] || node.id}</div>
           <div>flow &nbsp;&nbsp;<span style="color:${flowColor}">${fmt_usd(inflow)}</span></div>
           <div>AUM &nbsp;&nbsp;<span style="color:#8b949e">${fmt_aum(node.aum_usd)}</span></div>
-          <div>momentum <span style="color:#8b949e">${(node.momentum_rank * 100).toFixed(0)}th pct</span></div>
+          <div>momentum <span style="color:${node.momentum != null && node.momentum < 0 ? "#ff7eb6" : "#3ddbd9"}">${node.momentum != null ? (node.momentum >= 0 ? "+" : "") + node.momentum.toFixed(2) : "n/a"}</span> <span style="color:#8b949e">(${(node.momentum_rank * 100).toFixed(0)}th pct)</span></div>
         `;
         tip.style.display = "block";
       })
@@ -641,6 +653,7 @@
           net_inflow_usd: s.net_inflow_usd ?? null,
           aum_usd: s.aum_usd ?? null,
           momentum_rank: s.momentum_rank ?? 0.5,
+          momentum: s.momentum ?? null,
           fx: pos.fx, fy: pos.fy,
           x: pos.fx,  y: pos.fy,
         };
@@ -798,6 +811,7 @@
             net_inflow_usd: f.net_inflow_usd,
             aum_usd: f.aum_usd,
             momentum_rank: f.momentum_rank,
+            momentum: f.momentum,
           };
         });
         applyFlowUpdate({

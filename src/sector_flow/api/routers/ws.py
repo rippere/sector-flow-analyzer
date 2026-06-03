@@ -83,6 +83,7 @@ def _build_flow_message() -> dict:
                 "net_inflow_usd": raw_flow.get(ticker),
                 "aum_usd": raw_aum.get(ticker),
                 "momentum_rank": _rank(ticker),
+                "momentum": round(raw_momentum.get(ticker, 0.0), 4),
             }
             for ticker in TICKERS
             if ticker in etf_map

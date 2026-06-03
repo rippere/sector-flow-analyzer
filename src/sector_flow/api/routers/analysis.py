@@ -153,6 +153,7 @@ def get_flows(db: Session = Depends(get_db)) -> FlowAnalysisResponse:
             net_inflow_usd=raw_flow.get(ticker),
             aum_usd=raw_aum.get(ticker),
             momentum_rank=round(_momentum_rank(ticker), 4),
+            momentum=round(raw_momentum.get(ticker, 0.0), 4),
         )
         for ticker in TICKERS
         if ticker in etf_map

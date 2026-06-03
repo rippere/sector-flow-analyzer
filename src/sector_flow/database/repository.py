@@ -47,6 +47,13 @@ class PriceRepository:
             if existing is None:
                 self.session.add(PriceData(etf_id=etf_id, **rec))
                 saved += 1
+            elif existing.close == 0.0 and rec.get("close"):
+                # Fill SSGA skeleton rows (created pre-market with zeroed OHLCV) with
+                # the real bar — left at zero they poison momentum/regime computation.
+                for col in ("open", "high", "low", "close", "volume", "adjusted_close"):
+                    if rec.get(col) is not None:
+                        setattr(existing, col, rec[col])
+                saved += 1
         self.session.flush()
         return saved
 

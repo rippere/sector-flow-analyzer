@@ -110,6 +110,13 @@ def run_daily(lookback_days: int = 1, database_url: Optional[str] = None) -> dic
         # --- Phase 2: SSGA snapshot (today's shares_outstanding + AUM) ---
         try:
             snapshot = ssga_collector.fetch_snapshot()
+            # SSGA prints registered-trademark glyphs on some tickers ("GLD®") — strip for matching
+            snapshot["Ticker"] = (
+                snapshot["Ticker"].astype(str)
+                .str.replace("®", "", regex=False)
+                .str.replace("™", "", regex=False)
+                .str.strip()
+            )
             for ticker, _, _ in SECTOR_ETFS:
                 etf = etf_repo.get_by_ticker(ticker)
                 if etf is None:
@@ -120,10 +127,14 @@ def run_daily(lookback_days: int = 1, database_url: Optional[str] = None) -> dic
                     continue
 
                 r = row.iloc[0]
-                today_dt = datetime.combine(today, datetime.min.time())
+                # Stamp the snapshot with the FILE's own as-of date (it lags ~1 day),
+                # not the run date — re-downloading the same file then upserts the same
+                # row instead of minting a duplicate "today" row whose zero deltas
+                # freeze net_inflow at 0 (the 2026-06-03 incident).
+                as_of_dt = _parse_snapshot_as_of(r) or datetime.combine(today, datetime.min.time())
                 updated = price_repo.update_flow_fields(
                     etf_id=etf.id,
-                    as_of=today_dt,
+                    as_of=as_of_dt,
                     shares_outstanding=_to_float(r.get("Shares Outstanding")),
                     aum_usd=_to_float(r.get("Total Net Assets")),
                 )
@@ -149,6 +160,26 @@ def run_daily(lookback_days: int = 1, database_url: Optional[str] = None) -> dic
 def _to_float(val) -> float | None:
     from sector_flow.collectors.ssga_collector import _to_float as _ssga_to_float
     return _ssga_to_float(val)
+
+
+def _parse_snapshot_as_of(row) -> Optional[datetime]:
+    """Parse the SSGA 'As of**' cell ('Jun 02 2026' or a Timestamp) to a midnight datetime."""
+    raw = None
+    for key in ("As of**", "As of", "As Of**", "As Of"):
+        raw = row.get(key)
+        if raw is not None:
+            break
+    if raw is None:
+        return None
+    try:
+        import pandas as pd
+
+        ts = pd.to_datetime(str(raw), errors="coerce")
+        if ts is None or pd.isna(ts):
+            return None
+        return datetime.combine(ts.date(), datetime.min.time())
+    except Exception:
+        return None
 
 
 def backfill(days: Optional[int] = None, database_url: Optional[str] = None) -> dict:

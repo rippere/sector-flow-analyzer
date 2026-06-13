@@ -472,3 +472,119 @@ def test_get_db_yields_session():
         session = next(gen)
 
     assert session is mock_session
+
+
+# ---------------------------------------------------------------------------
+# Regime classification branches (lines 72-76 in analysis.py)
+# ---------------------------------------------------------------------------
+
+def _make_regime_mocks(cohesion: float, momentum_by_ticker: dict[str, float]):
+    """Return (etf_inst, flow_inst, cov_inst) that steer regime classification.
+
+    momentum_by_ticker maps real sector ticker → momentum value so that the
+    TICKERS loop in _get_regime_snapshot can find each ETF in etf_map.
+    """
+    from unittest.mock import MagicMock
+    import uuid as _uuid
+
+    etfs = []
+    for ticker, mom in momentum_by_ticker.items():
+        e = MagicMock()
+        e.id = _uuid.uuid4()
+        e.ticker = ticker
+        etfs.append((e, mom))
+
+    mock_etf_inst = MagicMock()
+    mock_etf_inst.get_all.return_value = [e for e, _ in etfs]
+
+    id_to_mom = {str(e.id): mom for e, mom in etfs}
+
+    def _get_latest(etf_id, metric_name):
+        if metric_name == "cohesion":
+            return cohesion
+        if metric_name == "momentum":
+            return id_to_mom.get(str(etf_id), 0.0)
+        return None  # regime_label
+
+    mock_flow_inst = MagicMock()
+    mock_flow_inst.get_latest.side_effect = _get_latest
+
+    mock_cov_inst = MagicMock()
+    mock_cov_inst.get_latest_matrix.return_value = []
+
+    return mock_etf_inst, mock_flow_inst, mock_cov_inst
+
+
+@pytest.mark.asyncio
+async def test_regime_trending_when_high_cohesion(app_with_db):
+    """avg_cohesion > 0.6 → market_regime = 'trending' (line 72)."""
+    app, _ = app_with_db
+    etf_inst, flow_inst, cov_inst = _make_regime_mocks(
+        cohesion=0.75, momentum_by_ticker={"XLK": 0.1, "XLF": -0.1, "XLE": 0.0}
+    )
+
+    with patch("sector_flow.api.routers.analysis.ETFRepository", return_value=etf_inst):
+        with patch("sector_flow.api.routers.analysis.FlowMetricRepository", return_value=flow_inst):
+            with patch("sector_flow.api.routers.analysis.CovarianceRepository", return_value=cov_inst):
+                async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+                    resp = await ac.get("/analysis/regime")
+
+    assert resp.status_code == 200
+    assert resp.json()["market_regime"] == "trending"
+
+
+@pytest.mark.asyncio
+async def test_regime_rotation_when_bullish_majority(app_with_db):
+    """bullish > bearish, cohesion <= 0.6 → market_regime = 'rotation' (line 74)."""
+    app, _ = app_with_db
+    # 2 positive, 1 negative momentum → bullish majority
+    etf_inst, flow_inst, cov_inst = _make_regime_mocks(
+        cohesion=0.3, momentum_by_ticker={"XLK": 0.5, "XLF": 0.4, "XLE": -0.2}
+    )
+
+    with patch("sector_flow.api.routers.analysis.ETFRepository", return_value=etf_inst):
+        with patch("sector_flow.api.routers.analysis.FlowMetricRepository", return_value=flow_inst):
+            with patch("sector_flow.api.routers.analysis.CovarianceRepository", return_value=cov_inst):
+                async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+                    resp = await ac.get("/analysis/regime")
+
+    assert resp.status_code == 200
+    assert resp.json()["market_regime"] == "rotation"
+
+
+@pytest.mark.asyncio
+async def test_regime_risk_off_when_bearish_majority(app_with_db):
+    """bearish > bullish, cohesion <= 0.6 → market_regime = 'risk_off' (line 76)."""
+    app, _ = app_with_db
+    # 2 negative, 1 positive momentum → bearish majority
+    etf_inst, flow_inst, cov_inst = _make_regime_mocks(
+        cohesion=0.2, momentum_by_ticker={"XLK": -0.5, "XLF": -0.3, "XLE": 0.1}
+    )
+
+    with patch("sector_flow.api.routers.analysis.ETFRepository", return_value=etf_inst):
+        with patch("sector_flow.api.routers.analysis.FlowMetricRepository", return_value=flow_inst):
+            with patch("sector_flow.api.routers.analysis.CovarianceRepository", return_value=cov_inst):
+                async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+                    resp = await ac.get("/analysis/regime")
+
+    assert resp.status_code == 200
+    assert resp.json()["market_regime"] == "risk_off"
+
+
+@pytest.mark.asyncio
+async def test_regime_neutral_when_balanced(app_with_db):
+    """bullish == bearish, cohesion <= 0.6 → market_regime = 'neutral' (line 78)."""
+    app, _ = app_with_db
+    # 1 positive, 1 negative, 1 zero momentum → tied → neutral
+    etf_inst, flow_inst, cov_inst = _make_regime_mocks(
+        cohesion=0.3, momentum_by_ticker={"XLK": 0.5, "XLF": -0.5, "XLE": 0.0}
+    )
+
+    with patch("sector_flow.api.routers.analysis.ETFRepository", return_value=etf_inst):
+        with patch("sector_flow.api.routers.analysis.FlowMetricRepository", return_value=flow_inst):
+            with patch("sector_flow.api.routers.analysis.CovarianceRepository", return_value=cov_inst):
+                async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+                    resp = await ac.get("/analysis/regime")
+
+    assert resp.status_code == 200
+    assert resp.json()["market_regime"] == "neutral"

@@ -26,6 +26,7 @@ from sector_flow.analysis.significance import filter_significant_correlations
 from sector_flow.analysis.regime import (
     classify_market_regime,
     classify_sector_regime,
+    compute_adaptive_thresholds,
     compute_cohesion,
     compute_momentum,
 )
@@ -124,7 +125,23 @@ def run_analysis(
                 flow_rows.append({"ticker": ticker, "net_inflow_usd": flow_vals[-1]})
 
         flow_df = pd.DataFrame(flow_rows) if flow_rows else None
-        market_regime = classify_market_regime(sig_df if not sig_df.empty else corr_df, flow_df=flow_df)
+
+        # Adaptive crisis/rotation thresholds from the rolling-correlation
+        # history (per-date mean|corr| and std), so regime calls are judged
+        # against this market's own recent behaviour rather than fixed cutoffs.
+        crisis_thr = rotation_thr = None
+        if not corr_df.empty and "date" in corr_df.columns:
+            by_date = corr_df.groupby("date")["correlation"]
+            cohesion_hist = by_date.apply(lambda s: s.abs().mean())
+            corr_std_hist = by_date.std()
+            crisis_thr, rotation_thr = compute_adaptive_thresholds(cohesion_hist, corr_std_hist)
+
+        market_regime = classify_market_regime(
+            sig_df if not sig_df.empty else corr_df,
+            flow_df=flow_df,
+            crisis_threshold=crisis_thr,
+            rotation_threshold=rotation_thr,
+        )
 
         # 6. Compute cohesion
         cohesion = compute_cohesion(sig_df if not sig_df.empty else corr_df)

@@ -16,9 +16,76 @@ import pandas as pd
 _RISK_ON_TICKERS = {"XLK", "XLY", "XLF"}
 _RISK_OFF_TICKERS = {"XLU", "XLP", "XLV"}
 
-_CRISIS_THRESHOLD = 0.80          # avg pairwise correlation
-_ROTATION_STD_THRESHOLD = 0.25    # std of all pair correlations
+_CRISIS_THRESHOLD = 0.80          # avg pairwise correlation (static fallback)
+_ROTATION_STD_THRESHOLD = 0.25    # std of all pair correlations (static fallback)
 _MOMENTUM_WINDOW = 20             # days for momentum / sector-regime signals
+
+# Bounds keep adaptive thresholds sane even on pathological history.
+_CRISIS_BOUNDS = (0.55, 0.95)
+_ROTATION_BOUNDS = (0.10, 0.50)
+# Flow-tilt z-score magnitude required to call a flow-driven risk_on/off regime.
+_FLOW_Z_THRESHOLD = 1.0
+
+
+def compute_adaptive_thresholds(
+    cohesion_history=None,
+    corr_std_history=None,
+    *,
+    crisis_pct: float = 0.90,
+    rotation_pct: float = 0.75,
+    min_obs: int = 30,
+) -> tuple[float, float]:
+    """Derive crisis / rotation thresholds from recent market history.
+
+    Rather than fixed cutoffs (0.80 / 0.25) calibrated to one regime, set the
+    crisis threshold at the ``crisis_pct`` quantile of trailing cohesion and the
+    rotation threshold at the ``rotation_pct`` quantile of trailing correlation
+    dispersion — so "unusually correlated/dispersed" is judged against what this
+    market has actually been doing. Falls back to the static constants when there
+    is too little history (< ``min_obs``).
+
+    Parameters
+    ----------
+    cohesion_history, corr_std_history : pd.Series | None
+        Trailing per-date mean(|corr|) and std(corr).
+
+    Returns
+    -------
+    (crisis_threshold, rotation_threshold)
+    """
+    crisis = _CRISIS_THRESHOLD
+    rotation = _ROTATION_STD_THRESHOLD
+
+    if cohesion_history is not None:
+        clean = cohesion_history.dropna()
+        if len(clean) >= min_obs:
+            crisis = float(np.clip(np.quantile(clean, crisis_pct), *_CRISIS_BOUNDS))
+    if corr_std_history is not None:
+        clean = corr_std_history.dropna()
+        if len(clean) >= min_obs:
+            rotation = float(np.clip(np.quantile(clean, rotation_pct), *_ROTATION_BOUNDS))
+
+    return crisis, rotation
+
+
+def risk_tilt(flow_df) -> float:
+    """Net risk-on minus risk-off inflow share, in [-1, 1].
+
+    ``(sum risk_on inflows - sum risk_off inflows) / sum |all inflows|`` — a
+    scale-free measure of how strongly capital is tilting toward cyclical
+    (risk-on) vs defensive (risk-off) sectors. 0.0 when there is no flow data.
+    """
+    if flow_df is None or flow_df.empty or "net_inflow_usd" not in flow_df.columns:
+        return 0.0
+    f = flow_df.dropna(subset=["net_inflow_usd"])
+    if f.empty:
+        return 0.0
+    denom = float(f["net_inflow_usd"].abs().sum())
+    if denom == 0.0:
+        return 0.0
+    on = float(f[f["ticker"].isin(_RISK_ON_TICKERS)]["net_inflow_usd"].sum())
+    off = float(f[f["ticker"].isin(_RISK_OFF_TICKERS)]["net_inflow_usd"].sum())
+    return float(np.clip((on - off) / denom, -1.0, 1.0))
 
 
 def compute_cohesion(corr_df: pd.DataFrame) -> float:
@@ -107,6 +174,9 @@ def compute_momentum(
 def classify_market_regime(
     corr_df: pd.DataFrame,
     flow_df: pd.DataFrame | None = None,
+    crisis_threshold: float | None = None,
+    rotation_threshold: float | None = None,
+    flow_baseline: tuple[float, float] | None = None,
 ) -> str:
     """
     Classify the overall market regime based on inter-sector correlations
@@ -119,6 +189,15 @@ def classify_market_regime(
         Must have 'ticker_a', 'ticker_b', 'correlation' columns.
     flow_df : pd.DataFrame | None
         Optional. Must have 'ticker' and 'net_inflow_usd' columns.
+    crisis_threshold, rotation_threshold : float | None
+        Override the static crisis/rotation cutoffs (e.g. with values from
+        :func:`compute_adaptive_thresholds`). ``None`` uses the module defaults.
+    flow_baseline : (mean, std) | None
+        Trailing mean/std of :func:`risk_tilt`. When provided, the flow-driven
+        regime is decided by whether today's tilt is a >|1σ| outlier vs its own
+        history — a statistical test rather than the old arbitrary "top-3 inflows
+        must include all of {XLK,XLF,XLY}" rule. Falls back to that subset rule
+        when no baseline is supplied (preserves prior behaviour).
 
     Returns
     -------
@@ -128,12 +207,15 @@ def classify_market_regime(
     if corr_df.empty:
         return "neutral"
 
+    crisis_thr = _CRISIS_THRESHOLD if crisis_threshold is None else crisis_threshold
+    rotation_thr = _ROTATION_STD_THRESHOLD if rotation_threshold is None else rotation_threshold
+
     correlations = corr_df["correlation"].values if "correlation" in corr_df.columns else np.array([])
 
     # --- Crisis: all sectors moving together ---
     if len(correlations) > 0:
         avg_corr = float(np.abs(correlations).mean())
-        if avg_corr > _CRISIS_THRESHOLD:
+        if avg_corr > crisis_thr:
             return "crisis"
 
     # --- Flow-based regime detection ---
@@ -143,16 +225,25 @@ def classify_market_regime(
             .sort_values("net_inflow_usd", ascending=False)
         )
         if len(ranked) >= 3:
-            top3 = set(ranked["ticker"].head(3).tolist())
-            if _RISK_ON_TICKERS.issubset(top3):
-                return "risk_on"
-            if _RISK_OFF_TICKERS.issubset(top3):
-                return "risk_off"
+            if flow_baseline is not None:
+                mu, sigma = flow_baseline
+                tilt = risk_tilt(flow_df)
+                z = (tilt - mu) / sigma if sigma else 0.0
+                if z >= _FLOW_Z_THRESHOLD:
+                    return "risk_on"
+                if z <= -_FLOW_Z_THRESHOLD:
+                    return "risk_off"
+            else:
+                top3 = set(ranked["ticker"].head(3).tolist())
+                if _RISK_ON_TICKERS.issubset(top3):
+                    return "risk_on"
+                if _RISK_OFF_TICKERS.issubset(top3):
+                    return "risk_off"
 
     # --- Rotation: high dispersion in correlations ---
     if len(correlations) > 1:
         corr_std = float(np.std(correlations))
-        if corr_std > _ROTATION_STD_THRESHOLD:
+        if corr_std > rotation_thr:
             return "rotation"
 
     return "neutral"

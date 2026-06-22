@@ -17,12 +17,34 @@ from sector_flow.collectors.ssga_collector import SSGACollector
 from sector_flow.database.models import SECTOR_ETFS
 from sector_flow.database.repository import ETFRepository, PriceRepository
 from sector_flow.database.session import get_session, init_db
+from sector_flow import market_calendar as mc
 
 
 TICKERS = [t for t, _, _ in SECTOR_ETFS]
 
 _MAX_GAP_DAYS = 30
 _WARN_GAP_TRADING_DAYS = 5
+
+
+def _max_trading_day_age(price_repo: PriceRepository, etf_repo: ETFRepository) -> int:
+    """Largest staleness across all ETFs, measured in **trading** days.
+
+    Unlike :func:`_compute_gap` (which returns a calendar-day window for the
+    yfinance fetch), this counts only market sessions between each ETF's latest
+    row and today — the correct basis for "is this data stale?" warnings.
+    """
+    today = date.today()
+    max_age = 0
+    for ticker, _, _ in SECTOR_ETFS:
+        etf = etf_repo.get_by_ticker(ticker)
+        if etf is None:
+            continue
+        latest = price_repo.get_latest_date(etf.id)
+        if latest is None:
+            continue
+        latest_date = latest.date() if isinstance(latest, datetime) else latest
+        max_age = max(max_age, mc.trading_days_between(latest_date, today))
+    return max_age
 
 
 def _compute_gap(price_repo: PriceRepository, etf_repo: ETFRepository) -> int:
@@ -81,12 +103,15 @@ def run_daily(lookback_days: int = 1, database_url: Optional[str] = None) -> dic
 
         etf_repo.seed_etfs()
 
-        # Auto-detect gap from DB instead of using hardcoded lookback_days=1
+        # Auto-detect gap from DB instead of using hardcoded lookback_days=1.
+        # `gap` (calendar days) drives the fetch window; `age_td` (trading days)
+        # is the accurate staleness signal for the warning.
         gap = _compute_gap(price_repo, etf_repo)
-        if gap > _WARN_GAP_TRADING_DAYS:
+        age_td = _max_trading_day_age(price_repo, etf_repo)
+        if age_td > _WARN_GAP_TRADING_DAYS:
             logger.warning(
-                f"[pipeline] Data gap is {gap} calendar days — "
-                f"exceeds {_WARN_GAP_TRADING_DAYS} trading-day threshold. "
+                f"[pipeline] Data is {age_td} trading days stale — "
+                f"exceeds {_WARN_GAP_TRADING_DAYS}-session threshold. "
                 f"Consider running backfill."
             )
         logger.info(f"[pipeline] Detected gap: {gap} calendar days → fetching from today-{gap}")
@@ -154,6 +179,60 @@ def run_daily(lookback_days: int = 1, database_url: Optional[str] = None) -> dic
             summary["flow_rows_updated"] += updated
 
     logger.info(f"Pipeline complete: {summary}")
+    return summary
+
+
+def run_intraday(database_url: Optional[str] = None, *, force: bool = False) -> dict:
+    """Lightweight intraday refresh during regular trading hours.
+
+    Updates today's in-progress price bar (yfinance only) and recomputes the
+    price-derived signals (momentum / correlation / cohesion / regime). It
+    deliberately **skips** the SSGA snapshot and flow phases — fund-flow data is
+    an EOD snapshot and cannot move intraday — so it never disturbs the
+    authoritative daily flow figures.
+
+    No-ops (returns ``{"skipped": "market_closed"}``) when the market is closed,
+    unless ``force=True`` (used by tests / manual runs).
+    """
+    if not force and not mc.is_market_open():
+        logger.info("[intraday] market closed — skipping")
+        return {"skipped": "market_closed", "yfinance_rows": 0, "errors": []}
+
+    from sector_flow.analysis.engine import run_analysis
+
+    init_db(database_url)
+    yf_collector = YFinanceCollector()
+    today = date.today()
+    summary = {"yfinance_rows": 0, "errors": []}
+
+    with get_session(database_url) as session:
+        etf_repo = ETFRepository(session)
+        price_repo = PriceRepository(session)
+        etf_repo.seed_etfs()
+
+        # Short window so today's live (in-progress) daily bar is captured;
+        # yfinance's `end` is exclusive, hence today + 1.
+        start = today - timedelta(days=4)
+        end = today + timedelta(days=1)
+        for ticker, _, _ in SECTOR_ETFS:
+            etf = etf_repo.get_by_ticker(ticker)
+            if etf is None:
+                continue
+            try:
+                records = yf_collector.fetch(ticker, start, end)
+                for rec in records:
+                    price_repo.upsert_intraday_bar(etf.id, rec)
+                    summary["yfinance_rows"] += 1
+            except Exception as exc:
+                logger.error(f"[intraday] yfinance error for {ticker}: {exc}")
+                summary["errors"].append(f"yfinance:{ticker}:{exc}")
+
+    # Recompute signals from the refreshed prices into an intraday-tagged snapshot
+    # (does not overwrite the EOD FlowMetric rows written by `analyze`).
+    analysis = run_analysis(database_url=database_url, intraday=True)
+    summary["market_regime"] = analysis["market_regime"]
+    summary["cohesion"] = analysis["cohesion"]
+    logger.info(f"[intraday] complete: {summary}")
     return summary
 
 

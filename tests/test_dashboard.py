@@ -301,21 +301,26 @@ class TestBuildDataHealthPanel:
         assert "1/2" in rendered
 
     def test_recent_date_yields_green_indicator(self):
+        # Patch the trading-day age so the colour band is deterministic regardless
+        # of weekends/holidays around the run date.
         today = date.today()
         sectors = [{"ticker": "XLK", "row_count": 10, "latest_date": today.isoformat(), "regime": None, "momentum": None}]
-        result = build_data_health_panel(sectors)
+        with patch("sector_flow.market_calendar.trading_days_between", return_value=0):
+            result = build_data_health_panel(sectors)
         assert "#00C853" in str(result)
 
     def test_stale_date_yields_red_indicator(self):
         old = date.today() - timedelta(days=30)
         sectors = [{"ticker": "XLK", "row_count": 10, "latest_date": old.isoformat(), "regime": None, "momentum": None}]
-        result = build_data_health_panel(sectors)
+        with patch("sector_flow.market_calendar.trading_days_between", return_value=20):
+            result = build_data_health_panel(sectors)
         assert "#D50000" in str(result)
 
     def test_slightly_stale_date_yields_yellow_indicator(self):
         slightly_stale = date.today() - timedelta(days=4)
         sectors = [{"ticker": "XLK", "row_count": 10, "latest_date": slightly_stale.isoformat(), "regime": None, "momentum": None}]
-        result = build_data_health_panel(sectors)
+        with patch("sector_flow.market_calendar.trading_days_between", return_value=3):
+            result = build_data_health_panel(sectors)
         assert "#FFD600" in str(result)
 
     def test_invalid_date_string_handled_without_crash(self):

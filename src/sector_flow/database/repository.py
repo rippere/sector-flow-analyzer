@@ -57,6 +57,29 @@ class PriceRepository:
         self.session.flush()
         return saved
 
+    def upsert_intraday_bar(self, etf_id: int, record: dict) -> bool:
+        """Insert or OVERWRITE the OHLCV bar for ``record['date']``.
+
+        Used by the intraday refresh so today's in-progress bar tracks the live
+        price. Unlike :meth:`save_price_data` (which deliberately won't clobber a
+        finalized EOD bar), this always writes the latest OHLCV. Flow fields
+        (net_inflow_usd / shares_outstanding / aum_usd) on an existing row are
+        preserved — only price/volume columns are touched.
+        """
+        existing = (
+            self.session.query(PriceData)
+            .filter_by(etf_id=etf_id, date=record["date"])
+            .first()
+        )
+        if existing is None:
+            self.session.add(PriceData(etf_id=etf_id, **record))
+        else:
+            for col in ("open", "high", "low", "close", "volume", "adjusted_close"):
+                if record.get(col) is not None:
+                    setattr(existing, col, record[col])
+        self.session.flush()
+        return True
+
     def get_price_data(
         self,
         etf_id: int,

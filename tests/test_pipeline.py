@@ -233,8 +233,9 @@ def test_run_daily_logs_warning_for_large_gap():
     ETFRepository(s).seed_etfs()
     s.commit()
 
-    # Insert data 10 days ago to produce a gap > 5
-    ten_ago = datetime.combine(date.today() - timedelta(days=10), datetime.min.time())
+    # Insert data 20 calendar days ago — robustly exceeds the 5-session warn
+    # threshold in trading days regardless of intervening holidays.
+    ten_ago = datetime.combine(date.today() - timedelta(days=20), datetime.min.time())
     for ticker, _, _ in SECTOR_ETFS:
         etf = s.query(SectorETF).filter_by(ticker=ticker).first()
         s.add(PriceData(

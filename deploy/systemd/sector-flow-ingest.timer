@@ -1,8 +1,9 @@
 [Unit]
-Description=Daily SSGA + yfinance ingestion — 8:30am ET (13:30 UTC) Mon–Fri
+Description=Daily SSGA + yfinance ingestion — 8:30am ET Mon–Fri (DST-correct)
 
 [Timer]
-OnCalendar=Mon..Fri 13:30:00 UTC
+# America/New_York keeps this at 08:30 ET year-round (no manual DST shift).
+OnCalendar=Mon..Fri 08:30:00 America/New_York
 RandomizedDelaySec=120
 Persistent=true
 

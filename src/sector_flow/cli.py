@@ -81,6 +81,30 @@ def analyze(db: str | None, window: int):
     click.echo()
 
 
+@main.command()
+@click.option("--db", default=None, help="Database URL (default: from .env)")
+@click.option("--force", is_flag=True, default=False,
+              help="Run even when the market is closed (default: no-op when closed)")
+def intraday(db: str | None, force: bool):
+    """Intraday refresh: update today's price bar and recompute price-derived signals.
+
+    Skips the SSGA flow snapshot (flows are EOD-only). No-ops outside regular
+    trading hours unless --force is given.
+    """
+    from sector_flow.pipeline import run_intraday
+    result = run_intraday(database_url=db, force=force)
+    if result.get("skipped"):
+        click.echo(f"Intraday skipped: {result['skipped']}")
+        return
+    click.echo(
+        f"Intraday refresh — yfinance: {result['yfinance_rows']} bars, "
+        f"regime: {result.get('market_regime', 'n/a').upper()}, "
+        f"cohesion: {result.get('cohesion', 0.0):.3f}"
+    )
+    if result["errors"]:
+        click.echo(f"Errors: {result['errors']}", err=True)
+
+
 @main.command(name="show-regime")
 @click.option("--db", default=None, help="Database URL (default: from .env)")
 def show_regime(db: str | None):

@@ -36,6 +36,7 @@ TICKERS = [t for t, _, _ in SECTOR_ETFS]
 def run_analysis(
     database_url: Optional[str] = None,
     window: int = 30,
+    intraday: bool = False,
 ) -> dict:
     """
     Run the full analysis pipeline and persist results.
@@ -134,6 +135,10 @@ def run_analysis(
         sector_momentum: dict[str, float] = {}
 
         analysis_date = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        # Intraday snapshots are written under distinct metric names so they
+        # refresh in place (one row/day) without clobbering the authoritative
+        # EOD rows that `analyze` writes under the plain names.
+        metric_sfx = "_intraday" if intraday else ""
 
         for ticker in TICKERS:
             etf = etf_map.get(ticker)
@@ -173,33 +178,35 @@ def run_analysis(
             sector_regimes[ticker] = regime
             sector_momentum[ticker] = mom
 
-            # 8. Persist to FlowMetric table
-            flow_repo.save_metric(etf.id, analysis_date, "regime_label", _regime_to_float(regime))
-            flow_repo.save_metric(etf.id, analysis_date, "momentum", mom)
-            flow_repo.save_metric(etf.id, analysis_date, "cohesion", cohesion)
+            # 8. Persist to FlowMetric table (intraday snapshots use suffixed names)
+            flow_repo.save_metric(etf.id, analysis_date, f"regime_label{metric_sfx}", _regime_to_float(regime))
+            flow_repo.save_metric(etf.id, analysis_date, f"momentum{metric_sfx}", mom)
+            flow_repo.save_metric(etf.id, analysis_date, f"cohesion{metric_sfx}", cohesion)
 
-        # 9. Persist covariance pairs to CovarianceMatrix
-        latest_pairs = compute_pairwise_latest(price_df, window=window)
-        enriched_pairs = []
-        computed_at = _utcnow()
-        for pair in latest_pairs:
-            etf_a = etf_map.get(pair["ticker_a"])
-            etf_b = etf_map.get(pair["ticker_b"])
-            if etf_a is None or etf_b is None:
-                continue
-            enriched_pairs.append(
-                {
-                    "etf_a_id": etf_a.id,
-                    "etf_b_id": etf_b.id,
-                    "window_days": pair["window_days"],
-                    "computed_at": computed_at,
-                    "covariance": pair["covariance"],
-                    "correlation": pair["correlation"],
-                }
-            )
+        # 9. Persist covariance pairs to CovarianceMatrix (EOD only — intraday
+        #    runs skip this to avoid bloating the matrix with per-interval rows).
+        if not intraday:
+            latest_pairs = compute_pairwise_latest(price_df, window=window)
+            enriched_pairs = []
+            computed_at = _utcnow()
+            for pair in latest_pairs:
+                etf_a = etf_map.get(pair["ticker_a"])
+                etf_b = etf_map.get(pair["ticker_b"])
+                if etf_a is None or etf_b is None:
+                    continue
+                enriched_pairs.append(
+                    {
+                        "etf_a_id": etf_a.id,
+                        "etf_b_id": etf_b.id,
+                        "window_days": pair["window_days"],
+                        "computed_at": computed_at,
+                        "covariance": pair["covariance"],
+                        "correlation": pair["correlation"],
+                    }
+                )
 
-        saved_cov = cov_repo.save_pairs(enriched_pairs)
-        logger.info(f"Saved {saved_cov} covariance pairs")
+            saved_cov = cov_repo.save_pairs(enriched_pairs)
+            logger.info(f"Saved {saved_cov} covariance pairs")
 
         result = {
             "market_regime": market_regime,
@@ -208,6 +215,7 @@ def run_analysis(
             "sector_momentum": sector_momentum,
             "significant_pairs": significant_pairs,
             "total_pairs": total_pairs,
+            "intraday": intraday,
         }
         logger.info(f"Analysis complete: {result}")
         return result

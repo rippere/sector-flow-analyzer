@@ -1,0 +1,14 @@
+[Unit]
+Description=Intraday refresh every 20 min during RTH — Mon–Fri ~09:30–16:00 ET
+
+[Timer]
+# Fire at :00/:20/:40 for hours 09–16 ET. The service itself no-ops outside the
+# open session, so the pre-open (09:00/09:20) and 16:00+ fires cost nothing.
+# America/New_York makes this DST-correct without manual adjustment.
+OnCalendar=Mon..Fri 09..16:00/20 America/New_York
+# Don't backfill missed intraday runs after downtime — a stale catch-up tick is
+# pointless for a live view.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

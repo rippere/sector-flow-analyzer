@@ -450,34 +450,38 @@ def build_data_health_panel(sectors: list[dict]) -> html.Div:
     else:
         last_ingestion = "unknown"
 
-    # --- Staleness indicator ---
+    # --- Staleness / market-status indicator ---
+    # Uses the real US trading calendar (not the old calendar_days * 5/7 estimate)
+    # to report true trading-day age and a LIVE/DELAYED/CLOSED/STALE state.
     staleness_color = "#90A4AE"  # grey default
     staleness_label = "unknown"
     trading_days_stale = None
+    market_state = None
 
     if latest_dates:
         try:
-            from datetime import datetime as dt_cls
-            # latest_date comes from API as "YYYY-MM-DDTHH:MM:SS" or "YYYY-MM-DD"
-            raw = most_recent_str[:10]  # take date portion
+            from datetime import datetime as dt_cls, time as time_cls
+            from sector_flow import market_calendar as mc
+
+            raw = most_recent_str[:10]  # "YYYY-MM-DD[THH:MM:SS]" → date portion
             latest_dt = date_type.fromisoformat(raw)
             today = date_type.today()
-            cal_days = (today - latest_dt).days
-            # Rough trading-day conversion: ~5/7 of calendar days
-            trading_days_stale = max(0, round(cal_days * 5 / 7))
+            trading_days_stale = mc.trading_days_between(latest_dt, today)
+            market_state = mc.market_status(dt_cls.combine(latest_dt, time_cls()))
         except (ValueError, TypeError):
             trading_days_stale = None
 
     if trading_days_stale is not None:
+        # Colour is a data-freshness signal (true trading-day age); the
+        # market-status word (LIVE/DELAYED/CLOSED/STALE) is shown as context.
         if trading_days_stale < 2:
-            staleness_color = "#00C853"   # green
-            staleness_label = f"{trading_days_stale} trading day(s) ago — current"
+            staleness_color = "#00C853"   # green — fresh
         elif trading_days_stale <= 5:
-            staleness_color = "#FFD600"   # yellow
-            staleness_label = f"~{trading_days_stale} trading days ago — slightly stale"
+            staleness_color = "#FFD600"   # yellow — slightly stale
         else:
-            staleness_color = "#D50000"   # red
-            staleness_label = f"~{trading_days_stale} trading days ago — stale, run ingest"
+            staleness_color = "#D50000"   # red — stale, run ingest
+        state_txt = market_state.value if market_state is not None else "?"
+        staleness_label = f"{state_txt} — {trading_days_stale} trading day(s) ago"
 
     # --- Flow coverage (sectors with row_count > 0 as proxy for flow data) ---
     # The /sectors response returns row_count; SSGA data gets merged into the same rows

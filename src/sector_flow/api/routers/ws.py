@@ -47,18 +47,28 @@ def _build_flow_message() -> dict:
         raw_momentum: dict[str, float] = {}
         raw_flow: dict[str, float | None] = {}
         raw_aum: dict[str, float | None] = {}
+        latest_data_dt = None
 
         for ticker in TICKERS:
             etf = etf_map.get(ticker)
             if etf is None:
                 continue
-            mom = flow_repo.get_latest(etf.id, "momentum")
+            # Prefer the intraday-tagged momentum (refreshed during RTH); fall
+            # back to the EOD value when no intraday snapshot exists yet.
+            mom = flow_repo.get_latest(etf.id, "momentum_intraday")
+            if mom is None:
+                mom = flow_repo.get_latest(etf.id, "momentum")
             raw_momentum[ticker] = mom if mom is not None else 0.0
             # Market bars land hours before each day's SSGA snapshot, so the
             # newest row is often bar-only — serve the latest SNAPSHOT-BEARING
             # row (mirrors the /analysis/flows fix; a bare rows[-1] here made
             # the first 60s broadcast wipe all flows to None and freeze the viz)
             rows = price_repo.get_price_data(etf.id)
+            if rows:
+                # rows are ordered by date asc → last is this ticker's latest bar
+                newest = rows[-1].date
+                if latest_data_dt is None or newest > latest_data_dt:
+                    latest_data_dt = newest
             snap = next((r for r in reversed(rows) if r.aum_usd is not None), None)
             if snap is not None:
                 raw_flow[ticker] = snap.net_inflow_usd
@@ -106,13 +116,23 @@ def _build_flow_message() -> dict:
 
         avg_cohesion = round(sum(corr_vals) / len(corr_vals), 4) if corr_vals else 0.0
 
+        # Freshness state for clients (dashboard banner, hardware display).
+        from sector_flow import market_calendar as mc
+        status = mc.market_status(
+            latest_data_dt, intraday_capable=settings.intraday_enabled
+        )
+
         return {
             "type": "flow_update",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": {
                 "sectors": sectors,
                 "correlations": correlations,
-                "meta": {"avg_cohesion": avg_cohesion},
+                "meta": {
+                    "avg_cohesion": avg_cohesion,
+                    "market_status": status.value,
+                    "last_data_at": latest_data_dt.isoformat() if latest_data_dt else None,
+                },
             },
         }
     finally:

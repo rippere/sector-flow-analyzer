@@ -1,8 +1,9 @@
 [Unit]
-Description=Daily analysis engine — 8:35am ET (13:35 UTC) Mon–Fri, after ingest
+Description=Daily analysis engine — 8:35am ET Mon–Fri, after ingest (DST-correct)
 
 [Timer]
-OnCalendar=Mon..Fri 13:35:00 UTC
+# America/New_York keeps this at 08:35 ET year-round (no manual DST shift).
+OnCalendar=Mon..Fri 08:35:00 America/New_York
 RandomizedDelaySec=60
 Persistent=true
 

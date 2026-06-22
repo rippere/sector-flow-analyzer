@@ -1,0 +1,15 @@
+[Unit]
+Description=Sector Flow Analyzer — repaint the embedded e-ink signal panel
+After=network-online.target sector-flow-api.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/mnt/external/Projects/sector-flow-analyzer
+Environment="HOME=/home/rippere"
+Environment="PYTHONUNBUFFERED=1"
+UnsetEnvironment=CLAUDECODE
+# Pulls the live snapshot from the local API and pushes it to the e-ink panel.
+ExecStart=/mnt/external/Projects/sector-flow-analyzer/.venv/bin/sector-flow display --device inky
+StandardOutput=append:/home/rippere/.sector_flow/logs/cron.log
+StandardError=append:/home/rippere/.sector_flow/logs/cron.log

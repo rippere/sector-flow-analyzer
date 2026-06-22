@@ -59,6 +59,9 @@ dev = [
     "mypy>=1.8.0",
     "pre-commit>=3.6.0",
 ]
+hardware = [
+    "pillow>=12.2.0",
+]
 
 [project.scripts]
 sector-flow = "sector_flow.cli:main"

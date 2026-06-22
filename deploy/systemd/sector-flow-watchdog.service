@@ -1,0 +1,7 @@
+[Unit]
+Description=Sector Flow Analyzer — kiosk/API watchdog (restart on failure)
+
+[Service]
+Type=oneshot
+Environment="HOME=/home/rippere"
+ExecStart=/mnt/external/Projects/sector-flow-analyzer/deploy/pi/watchdog.sh

@@ -105,6 +105,27 @@ def intraday(db: str | None, force: bool):
         click.echo(f"Errors: {result['errors']}", err=True)
 
 
+@main.command()
+@click.option("--api-url", default="http://localhost:8000", show_default=True, help="FastAPI base URL")
+@click.option("--device", default="console", show_default=True,
+              type=click.Choice(["console", "inky", "oled"]),
+              help="Output device (console saves a PNG; inky/oled need Pi hardware)")
+@click.option("--out", default="/tmp/sector_flow_panel.png", show_default=True,
+              help="PNG path for --device console")
+def display(api_url: str, device: str, out: str):
+    """Render the ambient signal panel from live API data to a device (WS4)."""
+    from sector_flow.hardware import build_snapshot, get_display, ConsoleDisplay
+
+    snapshot = build_snapshot(api_url)
+    dev = ConsoleDisplay(out_path=out) if device == "console" else get_display(device)
+    dev.show(snapshot)
+    if device == "console":
+        click.echo(f"Panel rendered → {out}  (regime: {snapshot.regime.upper()}, "
+                   f"lead: {snapshot.dominant}, status: {snapshot.market_status})")
+    else:
+        click.echo(f"Pushed panel to {device}  (regime: {snapshot.regime.upper()})")
+
+
 @main.command(name="show-regime")
 @click.option("--db", default=None, help="Database URL (default: from .env)")
 def show_regime(db: str | None):

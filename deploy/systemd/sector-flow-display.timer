@@ -1,0 +1,13 @@
+[Unit]
+Description=Repaint the e-ink signal panel every 20 min during RTH (Mon–Fri ET)
+
+[Timer]
+# Match the intraday refresh cadence; e-ink's multi-second redraw is fine here.
+# A couple of off-session fires just repaint the (dimmed) CLOSED/STALE state.
+OnCalendar=Mon..Fri 09..16:05/20 America/New_York
+# Repaint once on boot so the panel is populated after a restart.
+OnBootSec=2min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

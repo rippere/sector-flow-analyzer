@@ -27,6 +27,19 @@ is backward-compatible: all new arguments are optional.
 
 ## Validated performance (observed, real yfinance data)
 
+> **Methodology scope — read before citing these numbers.** The walk-forward and
+> cross-validation results below were produced by `scripts/backtest_regime.py`, whose
+> `compute_regime_at()` is a deliberately simple *baseline* classifier (median 45-day
+> cross-sector momentum vs a fixed ±0.5% threshold). It does **not** call
+> `classify_market_regime()`, `compute_adaptive_thresholds()`, or `risk_tilt()` — so these
+> numbers validate the baseline momentum regime signal, **not** the adaptive-threshold /
+> flow-tilt model described above. Additionally, the z-score flow-tilt path is not yet
+> exercised in production: `run_analysis()` supplies no `flow_baseline`, so
+> `classify_market_regime()` currently takes the legacy top-3-inflows branch in the live
+> pipeline. Wiring the backtest to the adaptive classifier (and the baseline into the
+> engine) is future work; treat the adaptive-threshold model as unit-tested but not yet
+> backtest-validated.
+
 **5-year walk-forward, 45-day momentum window** (`scripts/backtest_regime.py`, in-sample
 years 1-2, OOS years 3-5): p=3.26e-20 at the 45d/20d horizon; 61.1% hit rate; risk_off periods
 show +2.63% mean 20-day forward return (mean-reversion).

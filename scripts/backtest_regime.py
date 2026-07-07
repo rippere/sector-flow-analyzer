@@ -37,24 +37,53 @@ TICKERS = ["XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLB", "XLRE", "XLU"
 BEST_WINDOW = 45          # most significant window from signal_validity_test.py
 REGIME_THRESHOLD_PCT = 0.5   # 0.5% median cross-sector return threshold
 HORIZONS = [5, 20]
-YEARS_TOTAL = 5
+YEARS_TOTAL = 15          # extended history (was 5) — see uneven-inception note below
 YEARS_INSAMPLE = 2
+
+# XLRE (2015) and XLC (2018) post-date the nine original SPDR sectors (1998).
+# We begin the analysis only once at least MIN_SECTORS have data, so the early
+# years run on the available 9-sector cross-section rather than a degenerate few.
+MIN_SECTORS = 9
+
+# VIX benchmark bands (fixed, interpretable): elevated vol = risk_off.
+VIX_RISK_OFF = 25.0
+VIX_RISK_ON = 16.0
+
+# Optional CBOE put/call ratio benchmark — loaded from this CSV if present
+# (columns: date,put_call_ratio). High ratio = bearish sentiment = risk_off.
+PUT_CALL_CSV = Path.home() / ".sector_flow" / "put_call.csv"
+PUT_CALL_RISK_OFF = 1.0
+PUT_CALL_RISK_ON = 0.7
 
 
 def fetch_data(years: int = YEARS_TOTAL) -> pd.DataFrame:
-    """Fetch daily adjusted close prices."""
+    """Fetch daily adjusted close prices for sectors + SPY + ^VIX.
+
+    Trims leading rows until at least ``MIN_SECTORS`` sector ETFs have data, so
+    the deep-history period is not dominated by a degenerate 1-2 sector
+    cross-section while XLRE/XLC have not yet listed.
+    """
     end = datetime.today()
     start = end - timedelta(days=years * 365 + 30)
     print(f"Fetching {years}y of daily OHLCV ({start.date()} to {end.date()})...")
     raw = yf.download(
-        TICKERS + ["SPY"],
+        TICKERS + ["SPY", "^VIX"],
         start=start.strftime("%Y-%m-%d"),
         end=end.strftime("%Y-%m-%d"),
         auto_adjust=True,
         progress=False,
     )
     close = raw["Close"].dropna(how="all")
-    print(f"  Loaded {len(close)} trading days")
+
+    # Require MIN_SECTORS sector ETFs present before the window starts.
+    sector_coverage = close[TICKERS].notna().sum(axis=1)
+    eligible = sector_coverage[sector_coverage >= MIN_SECTORS]
+    if not eligible.empty:
+        close = close.loc[eligible.index[0]:]
+    n_full = int((close[TICKERS].notna().sum(axis=1) == len(TICKERS)).sum())
+    print(f"  Loaded {len(close)} trading days "
+          f"({close.index[0].date()} to {close.index[-1].date()}); "
+          f"{n_full} days with all {len(TICKERS)} sectors")
     return close
 
 
@@ -95,6 +124,69 @@ def regime_to_int(regime: str) -> int:
     return {"risk_on": 1, "neutral": 0, "risk_off": -1}[regime]
 
 
+def compute_vix_regime(vix_series, idx: int) -> str:
+    """VIX benchmark: elevated implied vol = risk_off, calm = risk_on.
+
+    Uses the prior day's close (idx-1) to avoid look-ahead.
+    """
+    if vix_series is None or idx < 1 or idx > len(vix_series):
+        return "neutral"
+    v = vix_series.iloc[idx - 1]
+    if pd.isna(v):
+        return "neutral"
+    if v >= VIX_RISK_OFF:
+        return "risk_off"
+    if v <= VIX_RISK_ON:
+        return "risk_on"
+    return "neutral"
+
+
+def load_put_call():
+    """Load the optional CBOE put/call ratio series, or None if unavailable."""
+    if not PUT_CALL_CSV.exists():
+        print(f"  put/call benchmark: {PUT_CALL_CSV} not found — skipping")
+        return None
+    try:
+        pc = pd.read_csv(PUT_CALL_CSV, parse_dates=["date"]).set_index("date")["put_call_ratio"]
+        print(f"  put/call benchmark: loaded {len(pc)} rows from {PUT_CALL_CSV}")
+        return pc.sort_index()
+    except Exception as exc:
+        print(f"  put/call CSV unreadable ({exc}) — skipping benchmark")
+        return None
+
+
+def compute_pc_regime(pc_series, dt) -> str:
+    """Put/call benchmark: high ratio = bearish sentiment = risk_off (most recent
+    reading strictly before ``dt`` to avoid look-ahead)."""
+    if pc_series is None:
+        return "neutral"
+    prior = pc_series[pc_series.index < dt]
+    if prior.empty:
+        return "neutral"
+    v = float(prior.iloc[-1])
+    if v >= PUT_CALL_RISK_OFF:
+        return "risk_off"
+    if v <= PUT_CALL_RISK_ON:
+        return "risk_on"
+    return "neutral"
+
+
+def confusion_matrix_vs(df: pd.DataFrame, col: str) -> dict:
+    """Per-regime TP/FP/FN/TN of the walk-forward label vs a benchmark column."""
+    regimes = ["risk_on", "neutral", "risk_off"]
+    result = {}
+    for regime in regimes:
+        wf = df["regime"] == regime
+        bench = df[col] == regime
+        result[regime] = {
+            "tp": int((wf & bench).sum()),
+            "fp": int((wf & ~bench).sum()),
+            "fn": int((~wf & bench).sum()),
+            "tn": int((~wf & ~bench).sum()),
+        }
+    return result
+
+
 def run_walk_forward(close: pd.DataFrame) -> pd.DataFrame:
     """
     Walk-forward regime labeling from year 3 to year 5.
@@ -108,6 +200,8 @@ def run_walk_forward(close: pd.DataFrame) -> pd.DataFrame:
     """
     sector_close = close[TICKERS]
     spy_close = close["SPY"] if "SPY" in close.columns else None
+    vix_close = close["^VIX"] if "^VIX" in close.columns else None
+    pc_series = load_put_call()
 
     # Split in-sample / out-of-sample
     split_idx = int(len(close) * YEARS_INSAMPLE / YEARS_TOTAL)
@@ -135,6 +229,10 @@ def run_walk_forward(close: pd.DataFrame) -> pd.DataFrame:
         if spy_daily is not None:
             spy_regime = compute_spy_regime(spy_daily.iloc[:global_idx], BEST_WINDOW, global_idx)
 
+        # VIX + put/call benchmark regimes (no look-ahead)
+        vix_regime = compute_vix_regime(vix_close, global_idx)
+        pc_regime = compute_pc_regime(pc_series, dt)
+
         # Forward returns (may be NaN near end of series)
         fwd_5d = float(ew_daily.iloc[global_idx: global_idx + 5].sum()) if global_idx + 5 < len(ew_daily) else float("nan")
         fwd_20d = float(ew_daily.iloc[global_idx: global_idx + 20].sum()) if global_idx + 20 < len(ew_daily) else float("nan")
@@ -143,6 +241,8 @@ def run_walk_forward(close: pd.DataFrame) -> pd.DataFrame:
             "date": dt,
             "regime": regime,
             "spy_regime": spy_regime,
+            "vix_regime": vix_regime,
+            "pc_regime": pc_regime,
             "fwd_5d": fwd_5d,
             "fwd_20d": fwd_20d,
         })
@@ -248,11 +348,20 @@ def print_results(df: pd.DataFrame) -> dict:
     print(f"\nRegime transition probabilities (rows=from, cols=to):")
     print(trans.round(3).to_string())
 
-    # --- Confusion matrix vs SPY ---
-    cm = confusion_matrix_vs_spy(df)
-    print(f"\nConfusion matrix vs SPY momentum benchmark:")
-    for regime, counts in cm.items():
-        print(f"  {regime}: TP={counts['tp']}, FP={counts['fp']}, FN={counts['fn']}, TN={counts['tn']}")
+    # --- Confusion matrices vs benchmarks (SPY momentum, VIX, optional put/call) ---
+    benchmarks = {"spy": "spy_regime", "vix": "vix_regime"}
+    if "pc_regime" in df.columns and (df["pc_regime"] != "neutral").any():
+        benchmarks["put_call"] = "pc_regime"
+
+    confusion = {}
+    for name, col in benchmarks.items():
+        cm = confusion_matrix_vs(df, col)
+        confusion[name] = cm
+        # Agreement = fraction of days where our label matches the benchmark.
+        agree = float((df["regime"] == df[col]).mean())
+        print(f"\nConfusion matrix vs {name.upper()} (agreement {agree*100:.1f}%):")
+        for regime, counts in cm.items():
+            print(f"  {regime}: TP={counts['tp']}, FP={counts['fp']}, FN={counts['fn']}, TN={counts['tn']}")
 
     print(f"\n{'='*70}")
 
@@ -263,12 +372,16 @@ def print_results(df: pd.DataFrame) -> dict:
             "regime_threshold_pct": REGIME_THRESHOLD_PCT,
             "years_total": YEARS_TOTAL,
             "years_insample": YEARS_INSAMPLE,
+            "min_sectors": MIN_SECTORS,
+            "coverage_note": "Deep-history years run on >=MIN_SECTORS sectors; "
+                             "XLRE (2015) and XLC (2018) absent before listing.",
         },
         "regime_stats": regime_stats,
         "hit_rate_risk_on_5d": hit_rate,
         "brier_scores": {"5d": brier_5d, "20d": brier_20d},
         "transition_table": {r: trans.loc[r].to_dict() for r in trans.index},
-        "confusion_matrix_vs_spy": cm,
+        "confusion_matrices": confusion,
+        "confusion_matrix_vs_spy": confusion.get("spy"),  # back-compat key
     }
 
 

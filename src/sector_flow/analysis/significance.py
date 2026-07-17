@@ -4,6 +4,14 @@ Statistical significance filtering for sector correlation pairs.
 Prevents noise in sector flow analysis by retaining only pairs whose
 Pearson correlation is both large enough (min_abs_correlation) and
 statistically significant (p_value_threshold).
+
+Also provides a permutation-based validation harness: `compute_p_values`'
+parametric p-values assume normal, independent returns, and testing many
+pairs at once means the single best-looking pair is expected to look
+significant by chance alone (a "best-of-N" selection problem). The
+`permutation_correlation_test` and `best_of_n_significance` functions below
+build empirical null distributions instead of trusting the parametric
+assumption or the nominal per-pair p-value.
 """
 
 from __future__ import annotations
@@ -121,3 +129,138 @@ def filter_significant_correlations(
     )
 
     return df[df["significant"]].reset_index(drop=True)
+
+
+def permutation_correlation_test(
+    x: np.ndarray,
+    y: np.ndarray,
+    n_permutations: int = 2000,
+    rng: np.random.Generator | None = None,
+) -> tuple[float, float]:
+    """
+    Nonparametric permutation test for the Pearson correlation between two series.
+
+    Repeatedly shuffles `y` to break any association with `x` while preserving
+    each series' own marginal distribution, recomputing the correlation each
+    time to build an empirical null distribution. Avoids relying on
+    `scipy.stats.pearsonr`'s normality assumption, which daily return series
+    routinely violate.
+
+    Parameters
+    ----------
+    x, y : np.ndarray
+        Equal-length paired samples.
+    n_permutations : int
+        Number of label shuffles used to build the null distribution.
+    rng : np.random.Generator | None
+        Source of randomness; a fresh default_rng() is used if not supplied.
+
+    Returns
+    -------
+    tuple[float, float]
+        (observed_correlation, empirical_p_value). The p-value is the
+        two-tailed fraction of permuted |correlation| >= observed
+        |correlation|, with add-one smoothing so it is never exactly zero.
+        (nan, nan) if there are fewer than 3 paired observations.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if len(x) < 3 or len(x) != len(y):
+        return float("nan"), float("nan")
+
+    rng = rng if rng is not None else np.random.default_rng()
+
+    observed = float(np.corrcoef(x, y)[0, 1])
+    observed_abs = abs(observed)
+
+    exceed_count = 0
+    for _ in range(n_permutations):
+        shuffled_y = rng.permutation(y)
+        perm_corr = np.corrcoef(x, shuffled_y)[0, 1]
+        if abs(perm_corr) >= observed_abs:
+            exceed_count += 1
+
+    p_value = (exceed_count + 1) / (n_permutations + 1)
+    return observed, float(p_value)
+
+
+def best_of_n_significance(
+    price_df: pd.DataFrame,
+    window: int = 30,
+    n_permutations: int = 1000,
+    rng: np.random.Generator | None = None,
+) -> dict:
+    """
+    Selection-aware significance for the single most-correlated pair among N.
+
+    `compute_p_values` tests every ticker pair; reporting the nominal p-value
+    of whichever pair happens to look best overstates significance, since the
+    more pairs tested the more likely one clears a fixed threshold by chance
+    alone. This shuffles every ticker's own return series independently
+    (destroying all cross-sectional correlation while preserving each
+    series' marginal distribution), recomputes every pair's correlation
+    under that null, and tracks the *max* |correlation| across all pairs per
+    permutation — the empirical null distribution of "the best of N pairs".
+    The corrected p-value is the fraction of permutations whose best-of-N
+    correlation is at least as extreme as the one actually observed.
+
+    Parameters
+    ----------
+    price_df : pd.DataFrame
+        Wide-format price matrix (index=date, columns=tickers).
+    window : int
+        Number of most-recent rows to use, matching `compute_p_values`.
+    n_permutations : int
+        Number of independent full-panel shuffles used to build the null.
+    rng : np.random.Generator | None
+        Source of randomness; a fresh default_rng() is used if not supplied.
+
+    Returns
+    -------
+    dict
+        best_pair, best_correlation, nominal_p_value (from compute_p_values),
+        corrected_p_value (family-wise, permutation-based), n_pairs_tested.
+    """
+    pvals = compute_p_values(price_df, window=window)
+    if pvals.empty:
+        return {
+            "best_pair": None,
+            "best_correlation": float("nan"),
+            "nominal_p_value": float("nan"),
+            "corrected_p_value": float("nan"),
+            "n_pairs_tested": 0,
+        }
+
+    best_idx = pvals["correlation"].abs().idxmax()
+    best_row = pvals.loc[best_idx]
+    observed_max = float(pvals["correlation"].abs().max())
+
+    rng = rng if rng is not None else np.random.default_rng()
+    recent = price_df.dropna(how="all").tail(window)
+    tickers = sorted(recent.columns.tolist())
+
+    exceed_count = 0
+    for _ in range(n_permutations):
+        null_max = 0.0
+        shuffled = {t: rng.permutation(recent[t].dropna().values) for t in tickers}
+        for i, a in enumerate(tickers):
+            for b in tickers[i + 1:]:
+                xa, xb = shuffled[a], shuffled[b]
+                n = min(len(xa), len(xb))
+                if n < 3:
+                    continue
+                c = abs(np.corrcoef(xa[:n], xb[:n])[0, 1])
+                if c > null_max:
+                    null_max = c
+        if null_max >= observed_max:
+            exceed_count += 1
+
+    corrected_p = (exceed_count + 1) / (n_permutations + 1)
+
+    return {
+        "best_pair": (str(best_row["ticker_a"]), str(best_row["ticker_b"])),
+        "best_correlation": float(best_row["correlation"]),
+        "nominal_p_value": float(best_row["p_value"]),
+        "corrected_p_value": float(corrected_p),
+        "n_pairs_tested": int(len(pvals)),
+    }

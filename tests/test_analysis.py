@@ -266,6 +266,69 @@ class TestSignificance:
         assert result.empty
         assert list(result.columns) == ["ticker_a", "ticker_b", "correlation", "p_value"]
 
+    def test_permutation_correlation_test_detects_real_correlation(self):
+        """A near-perfectly linked pair should yield a small empirical p-value."""
+        from sector_flow.analysis.significance import permutation_correlation_test
+
+        rng = np.random.default_rng(7)
+        x = rng.normal(size=100)
+        y = x * 2 + rng.normal(scale=0.05, size=100)
+
+        observed, p_value = permutation_correlation_test(
+            x, y, n_permutations=200, rng=np.random.default_rng(1)
+        )
+        assert observed > 0.95
+        assert p_value < 0.05
+
+    def test_permutation_correlation_test_null_case(self):
+        """Independent series produce a valid correlation and p-value in range."""
+        from sector_flow.analysis.significance import permutation_correlation_test
+
+        rng = np.random.default_rng(3)
+        x = rng.normal(size=50)
+        y = rng.normal(size=50)
+
+        observed, p_value = permutation_correlation_test(
+            x, y, n_permutations=200, rng=np.random.default_rng(2)
+        )
+        assert -1.0 <= observed <= 1.0
+        assert 0.0 <= p_value <= 1.0
+
+    def test_permutation_correlation_test_insufficient_data(self):
+        """Fewer than 3 paired observations returns (nan, nan)."""
+        from sector_flow.analysis.significance import permutation_correlation_test
+
+        observed, p_value = permutation_correlation_test([1.0, 2.0], [1.0, 2.0])
+        assert math.isnan(observed)
+        assert math.isnan(p_value)
+
+    def test_best_of_n_significance_empty_input(self):
+        """No pair has enough overlap → nan-filled result with n_pairs_tested=0."""
+        from sector_flow.analysis.significance import best_of_n_significance
+
+        df = pd.DataFrame({
+            "XLK": pd.Series([100.0], index=pd.to_datetime(["2024-01-01"])),
+            "XLF": pd.Series([50.0], index=pd.to_datetime(["2024-02-01"])),
+        })
+        result = best_of_n_significance(df, window=30, n_permutations=50)
+        assert result["best_pair"] is None
+        assert result["n_pairs_tested"] == 0
+        assert math.isnan(result["corrected_p_value"])
+
+    def test_best_of_n_significance_returns_expected_shape(self):
+        """Multi-ticker panel yields a best_pair and a corrected p-value in [0, 1]."""
+        from sector_flow.analysis.significance import best_of_n_significance
+
+        price_df = _make_price_df(n_days=60, tickers=["XLK", "XLF", "XLE"])
+        result = best_of_n_significance(
+            price_df, window=30, n_permutations=100, rng=np.random.default_rng(5)
+        )
+
+        assert result["n_pairs_tested"] == 3
+        assert result["best_pair"] is not None
+        assert 0.0 <= result["corrected_p_value"] <= 1.0
+        assert 0.0 <= result["nominal_p_value"] <= 1.0
+
 
 # ---------------------------------------------------------------------------
 # Module 3 — regime.py

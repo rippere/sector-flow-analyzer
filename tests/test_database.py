@@ -1,5 +1,6 @@
 import pytest
-from datetime import datetime
+from datetime import datetime, timedelta
+from sqlalchemy import event
 from sector_flow.database.models import SectorETF, PriceData, SECTOR_ETFS
 from sector_flow.database.repository import ETFRepository, FlowMetricRepository, PriceRepository
 
@@ -56,6 +57,45 @@ def test_save_price_data_no_duplicates(db_session, mock_ohlcv_data):
     db_session.commit()
     assert saved2 == 0
     assert db_session.query(PriceData).count() == 5
+
+
+def test_save_price_data_query_count_is_constant(db_session, db_engine):
+    etf_repo = ETFRepository(db_session)
+    etf_repo.seed_etfs()
+    db_session.commit()
+    etf = etf_repo.get_by_ticker("XLK")
+
+    base = datetime(2024, 1, 2)
+    records = [
+        {
+            "date": base + timedelta(days=i),
+            "open": 100.0 + i,
+            "high": 102.0 + i,
+            "low": 99.0 + i,
+            "close": 101.0 + i,
+            "volume": 1_000_000.0,
+            "adjusted_close": 101.0 + i,
+        }
+        for i in range(3_800)
+    ]
+
+    select_count = 0
+
+    def _count_selects(conn, cursor, statement, *args):
+        nonlocal select_count
+        if statement.strip().upper().startswith("SELECT"):
+            select_count += 1
+
+    event.listen(db_engine, "before_cursor_execute", _count_selects)
+    try:
+        price_repo = PriceRepository(db_session)
+        saved = price_repo.save_price_data(etf.id, records)
+        db_session.commit()
+    finally:
+        event.remove(db_engine, "before_cursor_execute", _count_selects)
+
+    assert saved == 3_800
+    assert select_count == 1
 
 
 def test_get_price_data_with_date_filter(db_session, mock_ohlcv_data):

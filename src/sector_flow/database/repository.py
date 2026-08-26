@@ -38,12 +38,12 @@ class PriceRepository:
 
     def save_price_data(self, etf_id: int, records: list[dict]) -> int:
         saved = 0
+        existing_by_date = {
+            row.date: row
+            for row in self.session.query(PriceData).filter_by(etf_id=etf_id).all()
+        }
         for rec in records:
-            existing = (
-                self.session.query(PriceData)
-                .filter_by(etf_id=etf_id, date=rec["date"])
-                .first()
-            )
+            existing = existing_by_date.get(rec["date"])
             if existing is None:
                 self.session.add(PriceData(etf_id=etf_id, **rec))
                 saved += 1

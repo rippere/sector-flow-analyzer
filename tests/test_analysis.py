@@ -495,6 +495,49 @@ class TestRegime:
         regime = classify_sector_regime("XLK", prices, flow_series=None)
         assert regime == "breakdown"
 
+    def test_sector_regime_breakout_volume_proxy(self):
+        """No flow → rising volume proxy at a new 20-day high → 'breakout'."""
+        from sector_flow.analysis.regime import classify_sector_regime
+
+        # New 20-day high with an upward-trending price.
+        prices = pd.Series([100.0] * 19 + [130.0])
+        # Recent 5-day volume mean (2e6) exceeds the prior window mean (1e6),
+        # so the proxy derives has_positive_flow=True.
+        volume = pd.Series([1_000_000.0] * 15 + [2_000_000.0] * 5)
+        regime = classify_sector_regime(
+            "XLK", prices, flow_series=None, volume_series=volume
+        )
+        assert regime == "breakout"
+
+    def test_sector_regime_breakdown_volume_proxy(self):
+        """No flow → falling volume proxy at a new 20-day low → 'breakdown'."""
+        from sector_flow.analysis.regime import classify_sector_regime
+
+        # New 20-day low with a downward-trending price.
+        prices = pd.Series([100.0] * 19 + [70.0])
+        # Recent 5-day volume mean (1e6) is below the prior window mean (2e6),
+        # so the proxy derives has_positive_flow=False.
+        volume = pd.Series([2_000_000.0] * 15 + [1_000_000.0] * 5)
+        regime = classify_sector_regime(
+            "XLK", prices, flow_series=None, volume_series=volume
+        )
+        assert regime == "breakdown"
+
+    def test_sector_regime_volume_proxy_zero_prior_volume(self):
+        """No flow → prior-window volume of 0 makes the proxy None, which still
+        classifies (a new-high breakout takes the None-allowed branch)."""
+        from sector_flow.analysis.regime import classify_sector_regime
+
+        prices = pd.Series([100.0] * 19 + [130.0])
+        # Prior 15-day window is all zero → prior_vol == 0 → proxy is None
+        # (neither positive nor negative flow), so the breakout branch that
+        # accepts None still fires.
+        volume = pd.Series([0.0] * 15 + [1_000_000.0] * 5)
+        regime = classify_sector_regime(
+            "XLK", prices, flow_series=None, volume_series=volume
+        )
+        assert regime == "breakout"
+
     def test_sector_regime_neutral_short_series(self):
         """Single data point → 'neutral'."""
         from sector_flow.analysis.regime import classify_sector_regime

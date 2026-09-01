@@ -6,7 +6,9 @@ computes inter-sector correlation structure and fund-flow tilt, and classifies t
 current market regime (`crisis | risk_on | risk_off | rotation | neutral`).
 
 See [`docs/MODEL.md`](docs/MODEL.md) for how the regime signal is computed and what
-its validated performance actually covers.
+its validated performance actually covers, and
+[`docs/WORKING_STATE.md`](docs/WORKING_STATE.md) for the last known-working state and a
+rundown of the data sources (yfinance, SSGA) the pipeline depends on.
 
 ## Features
 

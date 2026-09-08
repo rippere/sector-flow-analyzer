@@ -368,6 +368,50 @@ async def test_get_analysis_flows_momentum_rank_in_range(app_with_analysis):
 
 
 @pytest.mark.asyncio
+async def test_get_analysis_flows_absent_momentum_does_not_outrank(app_with_db):
+    """A sector with no momentum data must not receive a higher momentum_rank
+    than sectors with real (even all-negative) momentum — regression for
+    audit:sector-flow-analyzer:bugs:get-flows-momentum-rank-absent-data-outranks.
+    """
+    from unittest.mock import MagicMock
+    from sqlalchemy.orm import sessionmaker
+    from sector_flow.database.models import SectorETF
+
+    app, engine = app_with_db
+
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    etf_ids_by_ticker = {e.ticker: e.id for e in session.query(SectorETF).all()}
+    session.close()
+
+    # Every sector has real, negative momentum except XLK, which has none.
+    momentum_by_ticker = {t: -0.5 for t in etf_ids_by_ticker}
+    momentum_by_ticker["XLF"] = -0.1  # best (highest) of the real values
+    del momentum_by_ticker["XLK"]
+
+    def _get_latest(etf_id, metric_name):
+        if metric_name != "momentum":
+            return None
+        ticker = next((t for t, i in etf_ids_by_ticker.items() if i == etf_id), None)
+        return momentum_by_ticker.get(ticker)
+
+    mock_flow_inst = MagicMock()
+    mock_flow_inst.get_latest.side_effect = _get_latest
+
+    with patch("sector_flow.api.routers.analysis.FlowMetricRepository", return_value=mock_flow_inst):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            resp = await ac.get("/analysis/flows")
+
+    data = resp.json()
+    by_ticker = {f["ticker"]: f for f in data["flows"]}
+
+    assert by_ticker["XLK"]["momentum"] is None
+    assert by_ticker["XLK"]["momentum_rank"] == 0.5
+    assert by_ticker["XLF"]["momentum_rank"] == 1.0
+    assert by_ticker["XLK"]["momentum_rank"] < by_ticker["XLF"]["momentum_rank"]
+
+
+@pytest.mark.asyncio
 async def test_get_analysis_flows_correlations_filtered_and_sorted(app_with_analysis):
     app, _ = app_with_analysis
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:

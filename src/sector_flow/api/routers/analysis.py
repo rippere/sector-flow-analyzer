@@ -110,7 +110,7 @@ def get_flows(db: Session = Depends(get_db)) -> FlowAnalysisResponse:
     id_to_ticker = {etf.id: etf.ticker for etf in etfs}
 
     # Collect raw momentum values for cross-sectional normalization
-    raw_momentum: dict[str, float] = {}
+    raw_momentum: dict[str, float | None] = {}
     raw_flow: dict[str, float | None] = {}
     raw_aum: dict[str, float | None] = {}
 
@@ -119,9 +119,12 @@ def get_flows(db: Session = Depends(get_db)) -> FlowAnalysisResponse:
         if etf is None:
             continue
 
-        # momentum lives in FlowMetric (stored by analysis engine)
+        # momentum lives in FlowMetric (stored by analysis engine). Keep
+        # missing values as None here — defaulting to 0.0 would fold "no
+        # data" into the cross-sectional min/max and could let an absent
+        # sector outrank sectors with real (e.g. all-negative) momentum.
         mom = flow_repo.get_latest(etf.id, "momentum")
-        raw_momentum[ticker] = mom if mom is not None else 0.0
+        raw_momentum[ticker] = mom
 
         # net_inflow_usd and aum_usd live in PriceData (from SSGA collector).
         # The market bar lands hours before each day's SSGA snapshot (and the
@@ -136,16 +139,23 @@ def get_flows(db: Session = Depends(get_db)) -> FlowAnalysisResponse:
             raw_flow[ticker] = None
             raw_aum[ticker] = None
 
-    # Min-max normalize momentum across all 11 sectors to [0.0, 1.0]
-    mom_values = list(raw_momentum.values())
+    # Min-max normalize momentum across all 11 sectors to [0.0, 1.0].
+    # Sectors with no momentum data are excluded from the min/max so an
+    # absent value can't masquerade as the top (or bottom) performer.
+    mom_values = [v for v in raw_momentum.values() if v is not None]
     mom_min = min(mom_values) if mom_values else 0.0
     mom_max = max(mom_values) if mom_values else 0.0
     mom_range = mom_max - mom_min
 
     def _momentum_rank(ticker: str) -> float:
-        if mom_range == 0.0:
+        raw = raw_momentum.get(ticker)
+        if raw is None or mom_range == 0.0:
             return 0.5
-        return (raw_momentum.get(ticker, 0.0) - mom_min) / mom_range
+        return (raw - mom_min) / mom_range
+
+    def _momentum(ticker: str) -> float | None:
+        raw = raw_momentum.get(ticker)
+        return round(raw, 4) if raw is not None else None
 
     flows = [
         SectorFlowEntry(
@@ -153,7 +163,7 @@ def get_flows(db: Session = Depends(get_db)) -> FlowAnalysisResponse:
             net_inflow_usd=raw_flow.get(ticker),
             aum_usd=raw_aum.get(ticker),
             momentum_rank=round(_momentum_rank(ticker), 4),
-            momentum=round(raw_momentum.get(ticker, 0.0), 4),
+            momentum=_momentum(ticker),
         )
         for ticker in TICKERS
         if ticker in etf_map
